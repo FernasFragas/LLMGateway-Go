@@ -1,0 +1,56 @@
+# Spectral ruleset for LLMGateway-Go.
+# The OpenAPI spec is a contract fixture: `make verify` fails if it drifts.
+# Built-in rules catch generic rot (the OMS-style `responses: {}` and
+# invalid examples); the gateway-* rules encode OUR contract invariants.
+
+extends: ["spectral:oas"]
+
+rules:
+  # --- built-ins, promoted: these two catch exactly the warts seen in the wild ---
+  oas3-valid-media-example: error   # every example must validate against its schema
+  operation-operationId: error
+  operation-tags: error
+  operation-success-response: error # an endpoint with no responses has no contract
+
+  # --- contract invariants from the architecture brief ---
+
+  gateway-errors-use-unified-body:
+    description: Every 4xx/5xx JSON response must reference ErrorBody — ad-hoc error shapes are contract drift (brief, design decision #4).
+    severity: error
+    resolved: false               # inspect the raw doc: $refs must survive to be checked
+    given:
+      # reusable error responses (the normal home)…
+      - $.components.responses[*].content.application/json.schema
+      # …and any inline 4xx/5xx someone adds directly under a path
+      - $.paths[*][*].responses[?(@property.match(/^[45]\d\d$/))].content.application/json.schema
+    then:
+      - field: $ref
+        function: truthy          # a missing $ref (inline shape) is drift too
+      - field: $ref
+        function: pattern
+        functionOptions:
+          match: ".*ErrorBody$"
+
+  gateway-chat-responses-carry-correlation-id:
+    description: Every /v1/chat response, success or error, must declare the X-Correlation-ID header — it is a required contract term (brief, MVP traceability).
+    severity: error
+    given: $.paths['/v1/chat'].post.responses[*]
+    then:
+      field: headers.X-Correlation-ID
+      function: truthy
+
+  gateway-429-carries-retry-after:
+    description: Every 429 must declare the Retry-After header — both quota and ceiling rejections promise it (brief, MVP limits).
+    severity: error
+    given: $.paths[*][*].responses['429']
+    then:
+      field: headers.Retry-After
+      function: truthy
+
+  gateway-request-schemas-reject-unknown-fields:
+    description: Request schemas must set additionalProperties false — unknown params are rejected, never dropped (spec, supported-subset).
+    severity: error
+    given: $.components.schemas.ChatRequest
+    then:
+      field: additionalProperties
+      function: falsy

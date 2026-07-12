@@ -1,0 +1,465 @@
+openapi: 3.0.3
+
+# ─────────────────────────────────────────────────────────────────────
+# LLMGateway-Go — one front door for every LLM.
+#
+# How to navigate this file:
+#   Scope decisions ............ info.description (the table)
+#   Endpoints .................. paths (/v1/chat is the data path)
+#   Error responses (reused) ... components.responses
+#   Request/response shapes .... components.schemas
+#   Headers as contract terms .. components.headers
+# ─────────────────────────────────────────────────────────────────────
+
+info:
+  title: LLMGateway-Go API
+  version: 0.1.0
+  contact:
+    name: Fernando
+    url: https://github.com/FernasFragas/LLMGateway-Go
+  description: |
+    OpenAI-compatible chat completions over OpenAI / Anthropic / Ollama, with
+    per-app failover policies, rate + slot limiting, and unconditional
+    disclosure of the model that actually served each request.
+
+    **Scope — the supported OpenAI subset (decisions, not transcription):**
+
+    | Feature | Status | Why |
+    |---|---|---|
+    | Tool calls | supported | The Agent service depends on them |
+    | Multimodal content blocks | rejected | `content` is a string; no consumer needs vision |
+    | `n` > 1 | rejected | Complicates failover and token accounting |
+    | `stream` | rejected | Non-goal for MVP; rejected, not ignored |
+    | `max_tokens` | **required** | Anthropic requires it; bounds cost per request |
+    | Unknown params | rejected | Never silently dropped — a hidden semantic change |
+
+    **Error contract:** every non-2xx response is the same `ErrorBody` shape —
+    machine-readable `error.code` (mapping 1:1 to the failure-modes table in the
+    architecture brief) plus the `X-Correlation-ID` header. There is deliberately
+    no "auth backend down" error: keys are cached in-memory (fail static), so that
+    failure cannot reach the request path.
+
+servers:
+  - url: http://llm-gateway.llm.svc.cluster.local
+    description: In-cluster only (not exposed publicly — see non-goals)
+
+tags:
+  - name: chat
+    description: The data path — OpenAI-compatible chat completions.
+  - name: ops
+    description: Probes and metrics for Kubernetes and Prometheus.
+
+security:
+  - bearerAuth: []
+
+# ─────────────────────────────────────────────────────────────────────
+# Endpoints
+# ─────────────────────────────────────────────────────────────────────
+
+paths:
+  /v1/chat:
+    post:
+      tags: [chat]
+      summary: Chat completion (OpenAI-compatible subset)
+      description: >
+        Auth → limits → route to the requested model → fail over per the app's
+        declared policy. The response always names the model that served.
+      operationId: createChatCompletion
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+            example:
+              model: gpt-4.1
+              max_tokens: 512
+              messages:
+                - role: user
+                  content: Summarize why slot ceilings matter, in one sentence.
+      responses:
+        '200':
+          description: >
+            Completion produced. `model` = what actually served (never an echo);
+            `X-Model-Substituted: true` iff policy allowed a different model.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+            X-Model-Substituted:
+              $ref: '#/components/headers/XModelSubstituted'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+              example:
+                id: chatcmpl-9f3a2b
+                object: chat.completion
+                created: 1767225600
+                model: claude-sonnet-4   # substitute served it — and says so
+                choices:
+                  - index: 0
+                    message:
+                      role: assistant
+                      content: Few long requests can hold more capacity than many short ones, so concurrency is limited per app, not just request rate.
+                    finish_reason: stop
+                usage: { prompt_tokens: 21, completion_tokens: 30, total_tokens: 51 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '502': { $ref: '#/components/responses/UpstreamFailed' }
+        '503': { $ref: '#/components/responses/ModelUnavailable' }
+        '504': { $ref: '#/components/responses/GatewayTimeout' }
+
+  /healthz:
+    get:
+      tags: [ops]
+      summary: Liveness probe
+      description: 200 while the process is healthy; failing tells the kubelet to restart the pod.
+      operationId: healthz
+      security: []
+      responses:
+        '200':
+          description: Process healthy.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok] }
+        '503':
+          description: Process unhealthy.
+
+  /readyz:
+    get:
+      tags: [ops]
+      summary: Readiness probe
+      description: 503 on cold start with no key cache — fail closed at readiness, where no traffic is harmed.
+      operationId: readyz
+      security: []
+      responses:
+        '200': { description: Key cache warm; pod may receive traffic. }
+        '503': { description: No key cache; Service routes around this pod. }
+
+  /metrics:
+    get:
+      tags: [ops]
+      summary: Prometheus metrics
+      description: >
+        llm_tokens_total, in_flight, concurrency_limit_rejections_total,
+        double_spend_risk_total, unobserved_spend_tokens_estimate,
+        key_cache_age_seconds, latency histograms — labeled by app and provider.
+      operationId: metrics
+      security: []
+      responses:
+        '200':
+          description: Prometheus text exposition format.
+          content:
+            text/plain:
+              schema: { type: string }
+
+components:
+
+  # ───────────────────────────────────────────────────────────────────
+  # Error responses — one shape, reused. Each maps to failure-table rows.
+  # ───────────────────────────────────────────────────────────────────
+
+  responses:
+    BadRequest:
+      description: 'Rejected before any provider was contacted. code: invalid_request | unsupported_parameter.'
+      headers:
+        X-Correlation-ID: { $ref: '#/components/headers/XCorrelationId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorBody' }
+          example:
+            error:
+              code: unsupported_parameter
+              message: "'stream' is not supported."
+              correlation_id: 4c1f9e0a-77aa-4b2e-9d1c-0f8a6c2d5e3b
+              details: { param: stream }
+
+    Unauthorized:
+      description: 'Missing or invalid API key; never forwarded. code: unauthorized.'
+      headers:
+        X-Correlation-ID: { $ref: '#/components/headers/XCorrelationId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorBody' }
+
+    PayloadTooLarge:
+      description: 'Body over the configured maximum. code: payload_too_large.'
+      headers:
+        X-Correlation-ID: { $ref: '#/components/headers/XCorrelationId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorBody' }
+
+    RateLimited:
+      description: >-
+        The app's own limits, in one of two currencies — code: quota_exceeded
+        (rate/token window) or concurrency_ceiling (max in-flight slots).
+        Provider-side 429s are NEVER surfaced as this status.
+      headers:
+        X-Correlation-ID: { $ref: '#/components/headers/XCorrelationId' }
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorBody' }
+          example:
+            error:
+              code: concurrency_ceiling
+              message: agent-service is at its in-flight ceiling (300).
+              correlation_id: 9a2d4f6c-1b3e-4a5d-8c7f-2e9b0d1a3c5e
+              details: { max_in_flight: 300, retry_after_seconds: 2 }
+
+    UpstreamFailed:
+      description: 'All policy-eligible provider attempts failed; raw provider errors are never leaked. code: upstream_failed.'
+      headers:
+        X-Correlation-ID: { $ref: '#/components/headers/XCorrelationId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorBody' }
+
+    ModelUnavailable:
+      description: >-
+        The app's failover policy leaves no eligible route (e.g. same-model with
+        its only route down) — the recorded fidelity-over-availability trade.
+        code: model_unavailable.
+      headers:
+        X-Correlation-ID: { $ref: '#/components/headers/XCorrelationId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorBody' }
+
+    GatewayTimeout:
+      description: 'Total request deadline exhausted; callers never wait past their budget. code: gateway_timeout.'
+      headers:
+        X-Correlation-ID: { $ref: '#/components/headers/XCorrelationId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorBody' }
+
+  # ───────────────────────────────────────────────────────────────────
+  # Headers — first-class contract terms
+  # ───────────────────────────────────────────────────────────────────
+
+  headers:
+    XCorrelationId:
+      description: Present on EVERY response, success or error; same value as error.correlation_id.
+      required: true
+      schema: { type: string }
+    XModelSubstituted:
+      description: Present (value "true") only when a different model served the request. Disclosure is unconditional.
+      schema: { type: string, enum: ["true"] }
+    RetryAfter:
+      description: Seconds to wait before retrying. Present on every 429.
+      required: true
+      schema: { type: integer, minimum: 0 }
+
+  parameters:
+    CorrelationId:
+      name: X-Correlation-ID
+      in: header
+      required: false
+      description: Optional client-supplied ID; adopted if present, generated if not. Echoed everywhere.
+      schema: { type: string, maxLength: 128 }
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: "Per-app API key from gateway config, sent as `Authorization: Bearer <key>`."
+
+  # ───────────────────────────────────────────────────────────────────
+  # Schemas
+  # ───────────────────────────────────────────────────────────────────
+
+  schemas:
+    ChatRequest:
+      type: object
+      additionalProperties: false   # unknown params rejected, never dropped
+      required: [model, messages, max_tokens]
+      properties:
+        model:
+          type: string
+          example: gpt-4.1
+          description: Requested model; the response's `model` reports what served.
+        messages:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/Message' }
+        max_tokens:
+          type: integer
+          minimum: 1
+          description: Required — bounds completion length and cost per request.
+        temperature: { type: number, minimum: 0, maximum: 2 }
+        top_p: { type: number, minimum: 0, maximum: 1 }
+        stop:
+          description: Up to 4 stop sequences (string or array).
+          oneOf:
+            - type: string
+            - type: array
+              maxItems: 4
+              items: { type: string }
+        tools:
+          type: array
+          items: { $ref: '#/components/schemas/Tool' }
+        tool_choice:
+          description: '"none", "auto", or a specific function.'
+          oneOf:
+            - type: string
+              enum: [none, auto]
+            - type: object
+              additionalProperties: false
+              required: [type, function]
+              properties:
+                type: { type: string, enum: [function] }
+                function:
+                  type: object
+                  additionalProperties: false
+                  required: [name]
+                  properties:
+                    name: { type: string }
+        n:
+          type: integer
+          enum: [1]
+          description: Only 1; other values → unsupported_parameter.
+        stream:
+          type: boolean
+          enum: [false]
+          description: Not supported; true → unsupported_parameter.
+
+    Message:
+      type: object
+      additionalProperties: false
+      required: [role]
+      properties:
+        role: { type: string, enum: [system, user, assistant, tool] }
+        content:
+          type: string
+          nullable: true
+          description: Plain string only. Null only on assistant messages carrying tool_calls.
+        tool_calls:
+          type: array
+          description: Assistant messages only.
+          items: { $ref: '#/components/schemas/ToolCall' }
+        tool_call_id:
+          type: string
+          description: Required when role=tool — the call this message answers.
+
+    Tool:
+      type: object
+      additionalProperties: false
+      required: [type, function]
+      properties:
+        type: { type: string, enum: [function] }
+        function:
+          type: object
+          additionalProperties: false
+          required: [name]
+          properties:
+            name: { type: string }
+            description: { type: string }
+            parameters:
+              type: object
+              description: JSON Schema for the function arguments.
+
+    ToolCall:
+      type: object
+      additionalProperties: false
+      required: [id, type, function]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [function] }
+        function:
+          type: object
+          additionalProperties: false
+          required: [name, arguments]
+          properties:
+            name: { type: string }
+            arguments:
+              type: string
+              description: JSON-encoded arguments, as produced by the model.
+
+    ChatResponse:
+      type: object
+      additionalProperties: false
+      required: [id, object, created, model, choices, usage]
+      properties:
+        id: { type: string }
+        object: { type: string, enum: [chat.completion] }
+        created: { type: integer, description: Unix timestamp. }
+        model:
+          type: string
+          description: The model that ACTUALLY served — never an echo of the request.
+        choices:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items: { $ref: '#/components/schemas/Choice' }
+        usage: { $ref: '#/components/schemas/Usage' }
+
+    Choice:
+      type: object
+      additionalProperties: false
+      required: [index, message, finish_reason]
+      properties:
+        index: { type: integer, enum: [0] }
+        message: { $ref: '#/components/schemas/Message' }
+        finish_reason: { type: string, enum: [stop, length, tool_calls] }
+
+    Usage:
+      type: object
+      additionalProperties: false
+      required: [prompt_tokens, completion_tokens, total_tokens]
+      properties:
+        prompt_tokens: { type: integer }
+        completion_tokens: { type: integer }
+        total_tokens: { type: integer }
+
+    ErrorBody:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, correlation_id]
+          properties:
+            code:
+              type: string
+              description: Machine-readable; maps 1:1 to the failure-modes table.
+              enum:
+                - invalid_request        # 400
+                - unsupported_parameter  # 400
+                - unauthorized           # 401
+                - payload_too_large      # 413
+                - quota_exceeded         # 429
+                - concurrency_ceiling    # 429
+                - upstream_failed        # 502
+                - model_unavailable      # 503
+                - gateway_timeout        # 504
+            message:
+              type: string
+              description: Human-readable; never a raw provider error.
+            correlation_id: { type: string }
+            details:
+              type: object
+              additionalProperties: false
+              description: Code-specific context; all optional.
+              properties:
+                param: { type: string, description: Offending parameter (400s). }
+                retry_after_seconds: { type: integer, description: Mirrors Retry-After (429s). }
+                quota:
+                  type: object
+                  additionalProperties: false
+                  properties:
+                    limit: { type: integer }
+                    window_seconds: { type: integer }
+                    used: { type: integer }
+                max_in_flight: { type: integer, description: The app's slot ceiling. }
+                requested_model: { type: string, description: Model with no eligible route (503). }

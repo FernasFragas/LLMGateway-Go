@@ -1,0 +1,70 @@
+# LLMGateway-Go — example configuration.
+# This file is a TEST FIXTURE: internal/config/config_test.go parses and
+# validates it in CI, so it cannot drift from the schema. Copy to config.yaml.
+
+server:
+  listen: ":8080"
+  max_body_bytes: 524288          # 512 KB — enforced with 413
+  global_max_in_flight: 800       # protects process memory (see brief: scale targets)
+  total_deadline: 30s             # default per-request budget (apps may override)
+  per_try_deadline: 10s           # per provider attempt; must be < total_deadline
+
+# Routes registry: which endpoint serves which model — transport facts only.
+# The gateway never declares two models interchangeable (see non-goals).
+routes:
+  - model: gpt-4.1
+    provider: openai
+    endpoint: https://api.openai.com/v1
+  - model: claude-sonnet-4
+    provider: anthropic
+    endpoint: https://api.anthropic.com/v1
+  - model: llama3
+    provider: ollama
+    endpoint: http://ollama.llm.svc.cluster.local:11434
+
+# Order tried when a policy permits leaving the requested model's route.
+failover_order: [openai, anthropic, ollama]
+
+# Per-app contract. Each app declares THREE limits (rate, tokens, slots)
+# and ONE failover policy. Policy forms:
+#   failover_policy: any                          — delegate to failover_order
+#   failover_policy: same-model                   — route failover only (default)
+#   failover_policy: { allowlist: [m1, m2] }      — app-named substitutes, in order
+apps:
+  rag-api:
+    api_key_ref: RAG_API_KEY      # hash or secret-store pointer, never the raw key
+    limits:
+      rps: 60
+      tokens_per_minute: 200000
+      max_in_flight: 600          # slot ceiling — must be <= global_max_in_flight
+    failover_policy: any
+
+  agent-service:
+    api_key_ref: AGENT_SERVICE_KEY
+    total_deadline: 150s          # long tool-calling runs (30-120 s) need a bigger budget
+    limits:
+      rps: 5
+      tokens_per_minute: 500000
+      max_in_flight: 300
+    failover_policy: same-model   # no substitutes, ever — its recorded trade
+
+  support-bot:
+    api_key_ref: SUPPORT_BOT_KEY
+    limits:
+      rps: 10
+      tokens_per_minute: 50000
+      max_in_flight: 50
+    failover_policy:
+      allowlist: [gpt-4.1, claude-sonnet-4]   # every entry must exist in routes
+
+redis:
+  addr: redis.llm.svc.cluster.local:6379      # quotas + breaker state only (fail open)
+
+secret_source:
+  kind: file                       # or: vault
+  path: /etc/gateway/keys          # provider keys + app keys
+  refresh_interval: 5m             # key cache TTL — staleness alert threshold
+
+telemetry:
+  otlp_endpoint: otel-collector.observability.svc.cluster.local:4317
+  metrics_listen: ":9090"

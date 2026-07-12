@@ -1,0 +1,32 @@
+# Path in repo: .github/workflows/verify.yml
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Spec is a fixture: built-in OAS rules + gateway-* contract invariants.
+      - name: Lint OpenAPI contract
+        run: make lint-spec
+
+      # config.example.yaml is a fixture: parsed and validated by the tests.
+      - name: Unit tests
+        run: make test
+
+      - name: Build
+        run: make build
