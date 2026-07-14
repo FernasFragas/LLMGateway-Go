@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func TestPrimaryRouteServesAndIsDisclosedUnchanged(t *testing.T) {
+func TestPrimaryModelProviderServesAndIsDisclosedUnchanged(t *testing.T) {
 	gw := newGateway(t)
 
 	res, err := gw.chat("gpt-4.1")
@@ -134,19 +134,19 @@ func TestFailoverServesTheSubstituteAndDisclosesIt(t *testing.T) {
 func TestSameModelPolicyRefusesSubstitutes(t *testing.T) {
 	gw := newGateway(t, failing("openai", FaultServerError))
 
-	_, err := gw.chatAs("agent-key", "gpt-4.1") // agent-service: same-model, single route
+	_, err := gw.chatAs("agent-key", "gpt-4.1") // agent-service: same-model, single model provider
 
 	gwErr := wantErrorCode(t, err, CodeModelUnavailable)
 	if gwErr.RequestedModel != "gpt-4.1" {
 		t.Errorf("requested model = %q, want gpt-4.1 named in the refusal", gwErr.RequestedModel)
 	}
 	if !reflect.DeepEqual(gw.provider.calls, []string{"openai"}) {
-		t.Errorf("attempts = %v, want only the requested model's route — no substitutes, ever", gw.provider.calls)
+		t.Errorf("attempts = %v, want only the requested model's provider — no substitutes, ever", gw.provider.calls)
 	}
 }
 
-func TestSameModelPolicyStillGetsRouteFailover(t *testing.T) {
-	gw := newGateway(t, routing(gptOpenAI, gptAzure), failing("openai", FaultServerError))
+func TestSameModelPolicyStillGetsProviderFailover(t *testing.T) {
+	gw := newGateway(t, modelProviders(gptOpenAI, gptAzure), failing("openai", FaultServerError))
 
 	res, err := gw.chatAs("agent-key", "gpt-4.1") // same model, second host
 
@@ -154,7 +154,7 @@ func TestSameModelPolicyStillGetsRouteFailover(t *testing.T) {
 		t.Fatal(err)
 	}
 	if res.Provider != "azure" || res.Model != "gpt-4.1" || res.Substituted {
-		t.Errorf("served = %q via %q (substituted=%v), want gpt-4.1 via azure, unsubstituted — route failover is a transport fact", res.Model, res.Provider, res.Substituted)
+		t.Errorf("served = %q via %q (substituted=%v), want gpt-4.1 via azure, unsubstituted — provider failover is a transport fact", res.Model, res.Provider, res.Substituted)
 	}
 }
 
@@ -174,14 +174,14 @@ func TestAllowlistFailsOverToTheAppsNamedSubstitute(t *testing.T) {
 func TestUnknownModelIsUnavailableWithoutAnyAttempt(t *testing.T) {
 	gw := newGateway(t)
 
-	_, err := gw.chat("gpt-5") // no route serves it — nothing to fail over from
+	_, err := gw.chat("gpt-5") // no model provider serves it — nothing to fail over from
 
 	gwErr := wantErrorCode(t, err, CodeModelUnavailable)
 	if gwErr.RequestedModel != "gpt-5" {
 		t.Errorf("requested model = %q, want gpt-5 named in the refusal", gwErr.RequestedModel)
 	}
 	if len(gw.provider.calls) != 0 {
-		t.Errorf("a provider was contacted for an unroutable model: %v", gw.provider.calls)
+		t.Errorf("a provider was contacted for a model none of them serves: %v", gw.provider.calls)
 	}
 }
 
@@ -262,7 +262,7 @@ func TestNewRefusesDeadlinesThatCouldStack(t *testing.T) {
 	gw := newGateway(t) // donor of valid deps
 
 	_, err := New(Config{
-		Routes:         gw.cfg.Routes,
+		ModelProviders: gw.cfg.ModelProviders,
 		FailoverOrder:  gw.cfg.FailoverOrder,
 		TotalDeadline:  time.Second,
 		PerTryDeadline: time.Second, // == total: one slow try eats the whole budget

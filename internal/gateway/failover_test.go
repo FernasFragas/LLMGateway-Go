@@ -1,64 +1,64 @@
 package gateway
 
-// planRoutes is the substitution contract as a pure function; each case is
-// one clause of decision #5.
+// planModelsProviders is the substitution contract as a pure function; each
+// case is one clause of decision #5.
 
 import (
 	"reflect"
 	"testing"
 )
 
-var briefRoutes = []Route{gptOpenAI, claude, llama}
+var briefModelProviders = []ModelProvider{gptOpenAI, claude, llama}
 var briefOrder = []string{"openai", "anthropic", "ollama"}
 
-func TestPlanRoutes(t *testing.T) {
+func TestPlanModelsProviders(t *testing.T) {
 	tests := []struct {
 		name            string
 		requested       string
 		policy          FailoverPolicy
-		routes          []Route
-		wantEligible    []Route
+		modelProviders  []ModelProvider
+		wantEligible    []ModelProvider
 		wantConstrained bool
 	}{
 		{
-			name:      "same-model offers only the requested model's routes",
-			requested: "gpt-4.1", policy: sameModel(), routes: briefRoutes,
-			wantEligible:    []Route{gptOpenAI},
-			wantConstrained: true, // other routes exist; the policy refused them
+			name:      "same-model offers only the requested model's providers",
+			requested: "gpt-4.1", policy: sameModel(), modelProviders: briefModelProviders,
+			wantEligible:    []ModelProvider{gptOpenAI},
+			wantConstrained: true, // other model providers exist; the policy refused them
 		},
 		{
 			name:      "the zero-value policy is same-model — substitution is opt-in",
-			requested: "gpt-4.1", policy: FailoverPolicy{}, routes: briefRoutes,
-			wantEligible:    []Route{gptOpenAI},
+			requested: "gpt-4.1", policy: FailoverPolicy{}, modelProviders: briefModelProviders,
+			wantEligible:    []ModelProvider{gptOpenAI},
 			wantConstrained: true,
 		},
 		{
-			name:      "same-model still gets route failover: same weights, second host",
-			requested: "gpt-4.1", policy: sameModel(), routes: []Route{gptOpenAI, gptAzure},
-			wantEligible:    []Route{gptOpenAI, gptAzure},
+			name:      "same-model still gets provider failover: same weights, second host",
+			requested: "gpt-4.1", policy: sameModel(), modelProviders: []ModelProvider{gptOpenAI, gptAzure},
+			wantEligible:    []ModelProvider{gptOpenAI, gptAzure},
 			wantConstrained: false, // nothing existed that the policy refused
 		},
 		{
 			name:      "any offers everything, substitutes in the gateway's failover order",
-			requested: "llama3", policy: anyModel(), routes: briefRoutes,
-			wantEligible:    []Route{llama, gptOpenAI, claude},
+			requested: "llama3", policy: anyModel(), modelProviders: briefModelProviders,
+			wantEligible:    []ModelProvider{llama, gptOpenAI, claude},
 			wantConstrained: false,
 		},
 		{
 			name:      "allowlist substitutes come in the app's preference order",
-			requested: "gpt-4.1", policy: allowing("llama3", "claude-sonnet-4"), routes: briefRoutes,
-			wantEligible:    []Route{gptOpenAI, llama, claude},
+			requested: "gpt-4.1", policy: allowing("llama3", "claude-sonnet-4"), modelProviders: briefModelProviders,
+			wantEligible:    []ModelProvider{gptOpenAI, llama, claude},
 			wantConstrained: false, // every existing substitute was named
 		},
 		{
-			name:      "an allowlist naming the requested model does not duplicate its route",
-			requested: "gpt-4.1", policy: allowing("gpt-4.1", "claude-sonnet-4"), routes: briefRoutes,
-			wantEligible:    []Route{gptOpenAI, claude},
+			name:      "an allowlist naming the requested model does not duplicate its provider",
+			requested: "gpt-4.1", policy: allowing("gpt-4.1", "claude-sonnet-4"), modelProviders: briefModelProviders,
+			wantEligible:    []ModelProvider{gptOpenAI, claude},
 			wantConstrained: true, // llama3 exists and was not named
 		},
 		{
-			name:      "an unrouted model is eligible nowhere — there is no primary to fail over from",
-			requested: "gpt-5", policy: anyModel(), routes: briefRoutes,
+			name:      "a model no provider serves is eligible nowhere — there is no primary to fail over from",
+			requested: "gpt-5", policy: anyModel(), modelProviders: briefModelProviders,
 			wantEligible:    nil,
 			wantConstrained: true,
 		},
@@ -66,7 +66,7 @@ func TestPlanRoutes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			eligible, constrained := planRoutes(tt.requested, tt.policy, tt.routes, briefOrder)
+			eligible, constrained := planModelsProviders(tt.requested, tt.policy, tt.modelProviders, briefOrder)
 			if !reflect.DeepEqual(eligible, tt.wantEligible) {
 				t.Errorf("eligible = %v, want %v", eligible, tt.wantEligible)
 			}
@@ -77,13 +77,13 @@ func TestPlanRoutes(t *testing.T) {
 	}
 }
 
-func TestPlanRoutesLeavesTheRoutesTableUntouched(t *testing.T) {
-	routes := []Route{llama, claude, gptOpenAI}
-	snapshot := append([]Route(nil), routes...)
+func TestPlanModelsProvidersLeavesTheTableUntouched(t *testing.T) {
+	table := []ModelProvider{llama, claude, gptOpenAI}
+	snapshot := append([]ModelProvider(nil), table...)
 
-	planRoutes("claude-sonnet-4", anyModel(), routes, briefOrder)
+	planModelsProviders("claude-sonnet-4", anyModel(), table, briefOrder)
 
-	if !reflect.DeepEqual(routes, snapshot) {
-		t.Errorf("planRoutes reordered the shared routes table: %v", routes)
+	if !reflect.DeepEqual(table, snapshot) {
+		t.Errorf("planModelsProviders reordered the shared model-providers table: %v", table)
 	}
 }

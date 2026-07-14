@@ -1,0 +1,10 @@
+# Operator-local configuration — config.example.yaml is the committed schema.
+config/config.yaml
+secrets/
+
+# Build artifacts
+/gateway
+
+# IDE
+.idea/
+.vscode/

@@ -18,10 +18,10 @@ import (
 // Config is the core's own tuning — transport facts and budgets from the
 // gateway config file, already parsed.
 type Config struct {
-	// Routes is the registry of which endpoint serves which model.
-	Routes []Route
+	// ModelProviders is the registry of which endpoint serves which model.
+	ModelProviders []ModelProvider
 	// FailoverOrder is the provider order tried when an app's policy permits
-	// leaving the requested model's routes.
+	// leaving the requested model's own providers.
 	FailoverOrder []string
 	// TotalDeadline is the default per-request budget; apps may override it.
 	TotalDeadline time.Duration
@@ -131,7 +131,7 @@ func (s *Service) Chat(ctx context.Context, apiKey string, req ChatRequest) (Cha
 	}
 	defer release()
 
-	eligible, constrained := planRoutes(req.Model, app.Policy, s.cfg.Routes, s.cfg.FailoverOrder)
+	eligible, constrained := planModelsProviders(req.Model, app.Policy, s.cfg.ModelProviders, s.cfg.FailoverOrder)
 	if len(eligible) == 0 {
 		s.usage.RecordRejection(app.Name, CodeModelUnavailable)
 		return ChatResult{}, modelUnavailable(req.Model)
@@ -147,24 +147,24 @@ func (s *Service) Chat(ctx context.Context, apiKey string, req ChatRequest) (Cha
 
 	attempts := 0
 	tried := make(map[string]bool, maxAttempts)
-	for _, route := range eligible {
+	for _, mp := range eligible {
 		if attempts == maxAttempts {
 			break
 		}
-		if tried[route.Provider] {
+		if tried[mp.Provider] {
 			continue // never the same provider twice
 		}
-		tried[route.Provider] = true
+		tried[mp.Provider] = true
 		attempts++
 
 		start := time.Now()
-		completion, err := s.tryRoute(ctx, route, req)
+		completion, err := s.tryModelProvider(ctx, mp, req)
 		if err == nil {
-			s.usage.RecordCompletion(app.Name, route, completion.Usage, time.Since(start), attempts > 1)
+			s.usage.RecordCompletion(app.Name, mp, completion.Usage, time.Since(start), attempts > 1)
 			return ChatResult{
-				Model:        route.Model, // what actually served — never an echo (decision #5)
-				Provider:     route.Provider,
-				Substituted:  route.Model != req.Model,
+				Model:        mp.Model, // what actually served — never an echo (decision #5)
+				Provider:     mp.Provider,
+				Substituted:  mp.Model != req.Model,
 				Message:      completion.Message,
 				FinishReason: completion.FinishReason,
 				Usage:        completion.Usage,
@@ -176,7 +176,7 @@ func (s *Service) Chat(ctx context.Context, apiKey string, req ChatRequest) (Cha
 			// provider may bill what it already generated (decision #3).
 			// There is no one to answer — the correlation ID in the edge's
 			// log is the only trace.
-			s.usage.RecordClientDisconnect(app.Name, route, unobservedTokens(err, req))
+			s.usage.RecordClientDisconnect(app.Name, mp, unobservedTokens(err, req))
 			return ChatResult{}, fmt.Errorf("caller disconnected: %w", callerCtx.Err())
 		}
 		if ctx.Err() != nil {
@@ -184,16 +184,16 @@ func (s *Service) Chat(ctx context.Context, apiKey string, req ChatRequest) (Cha
 			return ChatResult{}, &Error{Code: CodeGatewayTimeout, Message: "total request deadline exhausted"}
 		}
 		if billsDespiteFailure(err) {
-			s.usage.RecordDoubleSpendRisk(app.Name, route, unobservedTokens(err, req))
+			s.usage.RecordDoubleSpendRisk(app.Name, mp, unobservedTokens(err, req))
 		}
-		// Provider-scoped failure with budget left: the next eligible route,
-		// if any, is the one failover this request gets.
+		// Provider-scoped failure with budget left: the next eligible model
+		// provider, if any, is the one failover this request gets.
 	}
 
 	if attempts < maxAttempts && constrained {
-		// The plan ran out because the app's policy refused the routes that
-		// remain — its recorded fidelity-over-availability trade, not a
-		// gateway failure (decision #5).
+		// The plan ran out because the app's policy refused the model
+		// providers that remain — its recorded fidelity-over-availability
+		// trade, not a gateway failure (decision #5).
 		s.usage.RecordRejection(app.Name, CodeModelUnavailable)
 		return ChatResult{}, modelUnavailable(req.Model)
 	}
@@ -201,16 +201,16 @@ func (s *Service) Chat(ctx context.Context, apiKey string, req ChatRequest) (Cha
 	return ChatResult{}, &Error{Code: CodeUpstreamFailed, Message: "all eligible provider attempts failed"}
 }
 
-func (s *Service) tryRoute(ctx context.Context, route Route, req ChatRequest) (Completion, error) {
+func (s *Service) tryModelProvider(ctx context.Context, mp ModelProvider, req ChatRequest) (Completion, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.PerTryDeadline)
 	defer cancel()
-	return s.provider.Complete(ctx, route, req)
+	return s.provider.Complete(ctx, mp, req)
 }
 
 func modelUnavailable(model string) *Error {
 	return &Error{
 		Code:           CodeModelUnavailable,
-		Message:        fmt.Sprintf("no eligible route for %s under the app's failover policy", model),
+		Message:        fmt.Sprintf("no eligible model provider for %s under the app's failover policy", model),
 		RequestedModel: model,
 	}
 }

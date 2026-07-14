@@ -31,7 +31,7 @@ type Error struct {
 	RetryAfter     time.Duration // quota_exceeded, concurrency_ceiling: when to try again
 	Quota          *QuotaDetail  // quota_exceeded: the window that refused
 	MaxInFlight    int           // concurrency_ceiling: the app's slot ceiling
-	RequestedModel string        // model_unavailable: the model with no eligible route
+	RequestedModel string        // model_unavailable: the model with no eligible model provider
 }
 
 func (e *Error) Error() string {

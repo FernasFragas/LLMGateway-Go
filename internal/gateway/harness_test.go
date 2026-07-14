@@ -10,13 +10,13 @@ import (
 	"time"
 )
 
-// The vocabulary of every scenario: the routes table and apps from the
-// architecture brief.
+// The vocabulary of every scenario: the model-providers table and apps from
+// the architecture brief.
 var (
-	gptOpenAI = Route{Model: "gpt-4.1", Provider: "openai", Endpoint: "https://api.openai.com/v1"}
-	gptAzure  = Route{Model: "gpt-4.1", Provider: "azure", Endpoint: "https://azure.example/v1"}
-	claude    = Route{Model: "claude-sonnet-4", Provider: "anthropic", Endpoint: "https://api.anthropic.com/v1"}
-	llama     = Route{Model: "llama3", Provider: "ollama", Endpoint: "http://ollama:11434"}
+	gptOpenAI = ModelProvider{Model: "gpt-4.1", Provider: "openai", Endpoint: "https://api.openai.com/v1"}
+	gptAzure  = ModelProvider{Model: "gpt-4.1", Provider: "azure", Endpoint: "https://azure.example/v1"}
+	claude    = ModelProvider{Model: "claude-sonnet-4", Provider: "anthropic", Endpoint: "https://api.anthropic.com/v1"}
+	llama     = ModelProvider{Model: "llama3", Provider: "ollama", Endpoint: "http://ollama:11434"}
 )
 
 func sameModel() FailoverPolicy { return FailoverPolicy{Kind: PolicySameModel} }
@@ -51,8 +51,8 @@ type fixture struct {
 
 type option func(*fixture)
 
-// newGateway assembles a service around the brief's three-route table and
-// three apps — rag-api (any), agent-service (same-model), support-bot
+// newGateway assembles a service around the brief's three model providers
+// and three apps — rag-api (any), agent-service (same-model), support-bot
 // (allowlist: claude-sonnet-4). Every provider serves successfully unless an
 // option says otherwise.
 func newGateway(t *testing.T, opts ...option) *fixture {
@@ -60,7 +60,7 @@ func newGateway(t *testing.T, opts ...option) *fixture {
 	f := &fixture{
 		t: t,
 		cfg: Config{
-			Routes:         []Route{gptOpenAI, claude, llama},
+			ModelProviders: []ModelProvider{gptOpenAI, claude, llama},
 			FailoverOrder:  []string{"openai", "anthropic", "ollama"},
 			TotalDeadline:  5 * time.Second,
 			PerTryDeadline: time.Second,
@@ -106,8 +106,8 @@ func (f *fixture) send(key string, req ChatRequest) (ChatResult, error) {
 
 // --- scenario options ---
 
-func routing(routes ...Route) option {
-	return func(f *fixture) { f.cfg.Routes = routes }
+func modelProviders(providers ...ModelProvider) option {
+	return func(f *fixture) { f.cfg.ModelProviders = providers }
 }
 
 func deadlines(total, perTry time.Duration) option {
@@ -194,16 +194,16 @@ func (s *fakeSlots) TryAcquire(string) (release func(), ceiling int, ok bool) {
 
 type stub func(ctx context.Context) (Completion, error)
 
-// scriptedProvider serves every route successfully unless a stub says
-// otherwise, and records the providers attempted, in order.
+// scriptedProvider serves every model provider successfully unless a stub
+// says otherwise, and records the providers attempted, in order.
 type scriptedProvider struct {
 	stubs map[string]stub
 	calls []string
 }
 
-func (p *scriptedProvider) Complete(ctx context.Context, route Route, _ ChatRequest) (Completion, error) {
-	p.calls = append(p.calls, route.Provider)
-	if s, ok := p.stubs[route.Provider]; ok {
+func (p *scriptedProvider) Complete(ctx context.Context, mp ModelProvider, _ ChatRequest) (Completion, error) {
+	p.calls = append(p.calls, mp.Provider)
+	if s, ok := p.stubs[mp.Provider]; ok {
 		return s(ctx)
 	}
 
@@ -229,7 +229,7 @@ type eventLog struct {
 	disconnects  []spend
 }
 
-func (e *eventLog) RecordCompletion(_ string, _ Route, _ Usage, _ time.Duration, failedOver bool) {
+func (e *eventLog) RecordCompletion(_ string, _ ModelProvider, _ Usage, _ time.Duration, failedOver bool) {
 	e.completions++
 	e.failedOver = failedOver
 }
@@ -240,11 +240,11 @@ func (e *eventLog) RecordRejection(_ string, code ErrorCode) {
 
 func (e *eventLog) RecordRateLimiterFailOpen(string) { e.failOpens++ }
 
-func (e *eventLog) RecordDoubleSpendRisk(_ string, r Route, tokens int) {
+func (e *eventLog) RecordDoubleSpendRisk(_ string, r ModelProvider, tokens int) {
 	e.doubleSpends = append(e.doubleSpends, spend{r.Provider, tokens})
 }
 
-func (e *eventLog) RecordClientDisconnect(_ string, r Route, tokens int) {
+func (e *eventLog) RecordClientDisconnect(_ string, r ModelProvider, tokens int) {
 	e.disconnects = append(e.disconnects, spend{r.Provider, tokens})
 }
 

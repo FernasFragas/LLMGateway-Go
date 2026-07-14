@@ -2,27 +2,29 @@ package gateway
 
 import "sort"
 
-// planRoutes turns the routes table, the gateway's failover order, and one
-// app's policy into the ordered routes this request may use.
+// planModelsProviders turns the model-providers table, the gateway's
+// failover order, and one app's policy into the ordered model providers this
+// request may use.
 //
-// Routes serving the requested model always come first, in table order —
-// route failover is a transport fact, allowed under every policy. What may
-// follow them is the app's judgment, not the gateway's:
+// Model providers serving the requested model always come first, in table
+// order — provider failover is a transport fact, allowed under every policy.
+// What may follow them is the app's judgment, not the gateway's:
 //
 //   - same-model: nothing follows.
 //   - allowlist:  the app's named substitutes, in the app's preference order.
-//   - any:        every other route, in the gateway's failover order.
+//   - any:        every other model provider, in the gateway's failover order.
 //
-// If no route serves the requested model at all, nothing is eligible: there
-// is no primary to fail over from, and inventing one would be the gateway
-// judging models interchangeable (non-goal).
+// If no model provider serves the requested model at all, nothing is
+// eligible: there is no primary to fail over from, and inventing one would
+// be the gateway judging models interchangeable (non-goal).
 //
-// constrained reports whether the policy excluded routes that do exist — the
-// signal that an exhausted plan is the app's recorded fidelity trade (503
-// model_unavailable) rather than a gateway failure (502 upstream_failed).
-func planRoutes(requested string, policy FailoverPolicy, routes []Route, failoverOrder []string) (eligible []Route, constrained bool) {
-	var primary, rest []Route
-	for _, r := range routes {
+// constrained reports whether the policy excluded model providers that do
+// exist — the signal that an exhausted plan is the app's recorded fidelity
+// trade (503 model_unavailable) rather than a gateway failure (502
+// upstream_failed).
+func planModelsProviders(requested string, policy FailoverPolicy, modelProviders []ModelProvider, failoverOrder []string) (eligible []ModelProvider, constrained bool) {
+	var primary, rest []ModelProvider
+	for _, r := range modelProviders {
 		if r.Model == requested {
 			primary = append(primary, r)
 		} else {
@@ -31,7 +33,7 @@ func planRoutes(requested string, policy FailoverPolicy, routes []Route, failove
 	}
 
 	if len(primary) == 0 {
-		return nil, len(routes) > 0
+		return nil, len(modelProviders) > 0
 	}
 	eligible = primary
 
@@ -47,7 +49,6 @@ func planRoutes(requested string, policy FailoverPolicy, routes []Route, failove
 		})
 
 		return append(eligible, rest...), false
-
 	case PolicyAllowlist:
 		allowed := make(map[string]bool, len(policy.Allowlist))
 		for _, model := range policy.Allowlist {
@@ -70,7 +71,6 @@ func planRoutes(requested string, policy FailoverPolicy, routes []Route, failove
 		}
 
 		return eligible, constrained
-
 	default:
 		// PolicySameModel — and the conservative reading of anything
 		// unrecognized, including the zero value: substitution is opt-in.

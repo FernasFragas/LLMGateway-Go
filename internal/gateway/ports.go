@@ -47,13 +47,14 @@ type SlotLimiter interface {
 	TryAcquire(app string) (release func(), ceiling int, ok bool)
 }
 
-// ProviderClient executes one chat completion attempt against one route.
+// ProviderClient executes one chat completion attempt against one model
+// provider.
 // Adapters translate the domain request into their provider's wire format
 // and report failures as *ProviderFault, so the core can classify outcomes
 // without knowing any provider's protocol. The context carries the per-try
 // deadline; adapters must abort the outbound call when it fires.
 type ProviderClient interface {
-	Complete(ctx context.Context, route Route, req ChatRequest) (Completion, error)
+	Complete(ctx context.Context, mp ModelProvider, req ChatRequest) (Completion, error)
 }
 
 // UsageRecorder receives the facts the observability stack turns into
@@ -62,8 +63,8 @@ type ProviderClient interface {
 // the data path — observability never gates it.
 type UsageRecorder interface {
 	// RecordCompletion attributes one served request: tokens and latency by
-	// app and route, and whether a failover served it.
-	RecordCompletion(app string, route Route, usage Usage, latency time.Duration, failedOver bool)
+	// app and model provider, and whether a failover served it.
+	RecordCompletion(app string, mp ModelProvider, usage Usage, latency time.Duration, failedOver bool)
 	// RecordRejection counts a request the gateway refused, by outcome code.
 	RecordRejection(app string, code ErrorCode)
 	// RecordRateLimiterFailOpen counts a request admitted unmetered because
@@ -71,17 +72,17 @@ type UsageRecorder interface {
 	RecordRateLimiterFailOpen(app string)
 	// RecordDoubleSpendRisk counts a failover after a timeout or garbage
 	// 200, with the upper-bound tokens the abandoned attempt may still bill.
-	RecordDoubleSpendRisk(app string, route Route, estimatedTokens int)
+	RecordDoubleSpendRisk(app string, mp ModelProvider, estimatedTokens int)
 	// RecordClientDisconnect counts a caller that vanished mid-request, with
 	// the upper-bound tokens the aborted attempt may still bill.
-	RecordClientDisconnect(app string, route Route, estimatedTokens int)
+	RecordClientDisconnect(app string, mp ModelProvider, estimatedTokens int)
 }
 
 // NopUsageRecorder discards everything; the default when no recorder is wired.
 type NopUsageRecorder struct{}
 
-func (NopUsageRecorder) RecordCompletion(string, Route, Usage, time.Duration, bool) {}
-func (NopUsageRecorder) RecordRejection(string, ErrorCode)                          {}
-func (NopUsageRecorder) RecordRateLimiterFailOpen(string)                           {}
-func (NopUsageRecorder) RecordDoubleSpendRisk(string, Route, int)                   {}
-func (NopUsageRecorder) RecordClientDisconnect(string, Route, int)                  {}
+func (NopUsageRecorder) RecordCompletion(string, ModelProvider, Usage, time.Duration, bool) {}
+func (NopUsageRecorder) RecordRejection(string, ErrorCode)                                  {}
+func (NopUsageRecorder) RecordRateLimiterFailOpen(string)                                   {}
+func (NopUsageRecorder) RecordDoubleSpendRisk(string, ModelProvider, int)                   {}
+func (NopUsageRecorder) RecordClientDisconnect(string, ModelProvider, int)                  {}
