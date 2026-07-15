@@ -2,7 +2,7 @@ package gateway
 
 import "sort"
 
-// planModelsProviders turns the model-providers table, the gateway's
+// buildModelsProvidersFallback turns the model-providers table, the gateway's
 // failover order, and one app's policy into the ordered model providers this
 // request may use.
 //
@@ -22,7 +22,7 @@ import "sort"
 // exist — the signal that an exhausted plan is the app's recorded fidelity
 // trade (503 model_unavailable) rather than a gateway failure (502
 // upstream_failed).
-func planModelsProviders(requested string, policy FailoverPolicy, modelProviders []ModelProvider, failoverOrder []string) (eligible []ModelProvider, constrained bool) {
+func buildModelsProvidersFallback(requested string, policy FailoverPolicy, modelProviders []ModelProvider, failoverOrder []string) (eligible []ModelProvider, constrained bool) {
 	var primary, rest []ModelProvider
 	for _, r := range modelProviders {
 		if r.Model == requested {

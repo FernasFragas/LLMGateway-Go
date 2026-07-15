@@ -66,7 +66,7 @@ func TestPlanModelsProviders(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			eligible, constrained := planModelsProviders(tt.requested, tt.policy, tt.modelProviders, briefOrder)
+			eligible, constrained := buildModelsProvidersFallback(tt.requested, tt.policy, tt.modelProviders, briefOrder)
 			if !reflect.DeepEqual(eligible, tt.wantEligible) {
 				t.Errorf("eligible = %v, want %v", eligible, tt.wantEligible)
 			}
@@ -81,7 +81,7 @@ func TestPlanModelsProvidersLeavesTheTableUntouched(t *testing.T) {
 	table := []ModelProvider{llama, claude, gptOpenAI}
 	snapshot := append([]ModelProvider(nil), table...)
 
-	planModelsProviders("claude-sonnet-4", anyModel(), table, briefOrder)
+	buildModelsProvidersFallback("claude-sonnet-4", anyModel(), table, briefOrder)
 
 	if !reflect.DeepEqual(table, snapshot) {
 		t.Errorf("planModelsProviders reordered the shared model-providers table: %v", table)
