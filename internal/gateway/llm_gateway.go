@@ -97,6 +97,12 @@ func (NopUsageRecorder) RecordRateLimiterFailOpen(string)                       
 func (NopUsageRecorder) RecordDoubleSpendRisk(string, ModelProvider, int)                   {}
 func (NopUsageRecorder) RecordClientDisconnect(string, ModelProvider, int)                  {}
 
+// ChatService is the one slice of the core this adapter drives —
+// *gateway.Service satisfies it; tests substitute a stub.
+type ChatService interface {
+	Chat(ctx context.Context, apiKey string, req ChatRequest) (ChatResult, error)
+}
+
 // Config is the core's own tuning — transport facts and budgets from the
 // gateway config file, already parsed.
 type Config struct {
