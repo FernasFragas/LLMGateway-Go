@@ -109,6 +109,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
         '502': { $ref: '#/components/responses/UpstreamFailed' }
         '503': { $ref: '#/components/responses/ModelUnavailable' }
         '504': { $ref: '#/components/responses/GatewayTimeout' }
@@ -214,6 +215,18 @@ components:
               message: agent-service is at its in-flight ceiling (300).
               correlation_id: 9a2d4f6c-1b3e-4a5d-8c7f-2e9b0d1a3c5e
               details: { max_in_flight: 300, retry_after_seconds: 2 }
+
+    InternalError:
+      description: >-
+        A gateway bug — a recovered panic or a core failure outside the error
+        contract. The caller gets this shape and nothing more; the detail
+        goes to the gateway's log under the same correlation ID.
+        code: internal_error.
+      headers:
+        X-Correlation-ID: { $ref: '#/components/headers/XCorrelationId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorBody' }
 
     UpstreamFailed:
       description: 'All policy-eligible provider attempts failed; raw provider errors are never leaked. code: upstream_failed.'
@@ -440,6 +453,7 @@ components:
                 - payload_too_large      # 413
                 - quota_exceeded         # 429
                 - concurrency_ceiling    # 429
+                - internal_error         # 500 — a gateway bug, never request-dependent
                 - upstream_failed        # 502
                 - model_unavailable      # 503
                 - gateway_timeout        # 504
