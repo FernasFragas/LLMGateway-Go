@@ -8,3 +8,10 @@ secrets/
 # IDE
 .idea/
 .vscode/
+
+#binary
+bin/
+
+coverage.html
+
+.env

@@ -108,6 +108,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '429': { $ref: '#/components/responses/RateLimited' }
         '500': { $ref: '#/components/responses/InternalError' }
         '502': { $ref: '#/components/responses/UpstreamFailed' }
@@ -192,6 +193,14 @@ components:
 
     PayloadTooLarge:
       description: 'Body over the configured maximum. code: payload_too_large.'
+      headers:
+        X-Correlation-ID: { $ref: '#/components/headers/XCorrelationId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorBody' }
+
+    UnsupportedMediaType:
+      description: 'Content-Type is not application/json — declared, never guessed from the bytes. code: unsupported_media_type.'
       headers:
         X-Correlation-ID: { $ref: '#/components/headers/XCorrelationId' }
       content:
@@ -451,6 +460,7 @@ components:
                 - unsupported_parameter  # 400
                 - unauthorized           # 401
                 - payload_too_large      # 413
+                - unsupported_media_type # 415
                 - quota_exceeded         # 429
                 - concurrency_ceiling    # 429
                 - internal_error         # 500 — a gateway bug, never request-dependent
