@@ -57,6 +57,12 @@ func TestPlanModelsProviders(t *testing.T) {
 			wantConstrained: true, // llama3 exists and was not named
 		},
 		{
+			name:      "a duplicated allowlist entry earns its providers once",
+			requested: "gpt-4.1", policy: allowing("claude-sonnet-4", "claude-sonnet-4"), modelProviders: briefModelProviders,
+			wantEligible:    []ModelProvider{gptOpenAI, claude},
+			wantConstrained: true, // llama3 exists and was not named
+		},
+		{
 			name:      "a model no provider serves is eligible nowhere — there is no primary to fail over from",
 			requested: "gpt-5", policy: anyModel(), modelProviders: briefModelProviders,
 			wantEligible:    nil,

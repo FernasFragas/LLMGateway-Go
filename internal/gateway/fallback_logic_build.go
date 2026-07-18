@@ -52,8 +52,8 @@ func buildModelsProvidersFallback(requested string, policy FailoverPolicy, model
 	case PolicyAllowlist:
 		allowed := make(map[string]bool, len(policy.Allowlist))
 		for _, model := range policy.Allowlist {
-			if model == requested {
-				continue
+			if model == requested || allowed[model] {
+				continue // the requested model is already primary; a duplicate entry earned its providers already
 			}
 			allowed[model] = true
 			for _, r := range rest {
