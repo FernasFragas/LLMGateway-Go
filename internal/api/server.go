@@ -13,6 +13,12 @@ import (
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
 )
 
+// ChatService is the one slice of the core this adapter drives —
+// *gateway.Service satisfies it; tests substitute a stub.
+type ChatService interface {
+	Chat(ctx context.Context, apiKey string, req gateway.ChatRequest) (gateway.ChatResult, error)
+}
+
 // HealthChecker answers the two probe questions — *health.Checker satisfies
 // it; a logging decorator wraps it in main so the refusal reason, which the
 // terse probe body drops, still reaches an operator.
@@ -50,7 +56,7 @@ type Config struct {
 // logs — observability arrives through the two middleware seams and the
 // decorated ports, all composed in main.
 type Deps struct {
-	Chat   gateway.ChatService
+	Chat   ChatService
 	Health HealthChecker
 	// Metrics serves GET /metrics; nil until the Prometheus adapter lands
 	// (the route 404s meanwhile).
@@ -76,7 +82,7 @@ type Server struct {
 	mux    *http.ServeMux
 	health HealthChecker
 
-	chat         gateway.ChatService
+	chat         ChatService
 	metrics      http.Handler
 	requestMW    []Middleware
 	panicMW      []Middleware

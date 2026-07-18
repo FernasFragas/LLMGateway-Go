@@ -59,12 +59,12 @@ func servedBySubstitute() gateway.ChatResult {
 }
 
 // serving builds a Server over the given core stub.
-func serving(t *testing.T, chat gateway.ChatService) *Server {
+func serving(t *testing.T, chat ChatService) *Server {
 	t.Helper()
 	return servingWith(t, chat, health.NewChecker())
 }
 
-func servingWith(t *testing.T, chat gateway.ChatService, checker *health.Checker) *Server {
+func servingWith(t *testing.T, chat ChatService, checker *health.Checker) *Server {
 	t.Helper()
 	srv, err := New(Config{}, Deps{Chat: chat, Health: checker})
 	if err != nil {
@@ -75,7 +75,7 @@ func servingWith(t *testing.T, chat gateway.ChatService, checker *health.Checker
 
 // servingObserved is serving with the given decorators spliced into the two
 // seams — how tests state where routes() places each seam.
-func servingObserved(t *testing.T, chat gateway.ChatService, reqMW, panicMW []Middleware) *Server {
+func servingObserved(t *testing.T, chat ChatService, reqMW, panicMW []Middleware) *Server {
 	t.Helper()
 	srv, err := New(Config{}, Deps{
 		Chat: chat, Health: health.NewChecker(),
@@ -91,6 +91,7 @@ func servingObserved(t *testing.T, chat gateway.ChatService, reqMW, panicMW []Mi
 func postChat(srv *Server, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testKey)
+	req.Header.Set("Content-Type", "application/json")
 	return do(srv, req)
 }
 

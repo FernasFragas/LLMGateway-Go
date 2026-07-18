@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -130,6 +131,39 @@ func TestMultimodalContentIsRefused(t *testing.T) {
 	rec := postChat(serving(t, &chatStub{}), body)
 
 	wantErrorCode(t, rec, http.StatusBadRequest, "invalid_request")
+}
+
+func TestUndeclaredContentTypeIsRefused(t *testing.T) {
+	for name, contentType := range map[string]string{
+		"wrong type": "text/plain",
+		"absent":     "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			core := &chatStub{result: served()}
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat", strings.NewReader(validChatBody))
+			req.Header.Set("Authorization", "Bearer "+testKey)
+			if contentType != "" {
+				req.Header.Set("Content-Type", contentType)
+			}
+
+			rec := do(serving(t, core), req)
+
+			wantErrorCode(t, rec, http.StatusUnsupportedMediaType, "unsupported_media_type")
+			if core.calls != 0 {
+				t.Error("a rejected request must never reach the core")
+			}
+		})
+	}
+}
+
+func TestJSONContentTypeWithCharsetIsAccepted(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat", strings.NewReader(validChatBody))
+	req.Header.Set("Authorization", "Bearer "+testKey)
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+
+	rec := do(serving(t, &chatStub{result: served()}), req)
+
+	wantChatResponse(t, rec)
 }
 
 func TestOutOfRangeSamplingParamsAreRefused(t *testing.T) {

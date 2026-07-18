@@ -17,9 +17,10 @@ const (
 
 // The failures only the edge can see; the core's codes cover the rest.
 const (
-	codeUnsupportedParameter = "unsupported_parameter" // 400
-	codePayloadTooLarge      = "payload_too_large"     // 413
-	codeInternalError        = "internal_error"        // 500 — a recovered panic
+	codeUnsupportedParameter = "unsupported_parameter"  // 400
+	codePayloadTooLarge      = "payload_too_large"      // 413
+	codeUnsupportedMediaType = "unsupported_media_type" // 415
+	codeInternalError        = "internal_error"         // 500 — a recovered panic
 )
 
 // statusClientClosedRequest is nginx's convention for a caller that vanished
