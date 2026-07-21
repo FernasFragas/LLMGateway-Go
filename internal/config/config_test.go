@@ -1,0 +1,148 @@
+package config
+
+import (
+	"os"
+	"testing"
+	"time"
+
+	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
+)
+
+func TestExampleFileIsTheExecutableSchema(t *testing.T) {
+	cfg, err := Load(exampleFile)
+	if err != nil {
+		t.Fatalf("the shipped example must always load: %v", err)
+	}
+
+	if cfg.Server.Addr != ":8080" || cfg.Server.MaxBodyBytes != 524288 {
+		t.Errorf("Server = %+v, want the example's transport tuning", cfg.Server)
+	}
+	if cfg.Gateway.TotalDeadline != 30*time.Second || cfg.Gateway.PerTryDeadline != 10*time.Second {
+		t.Errorf("Gateway budgets = %+v, want the example's", cfg.Gateway)
+	}
+	if len(cfg.Gateway.ModelProviders) != 3 || cfg.Gateway.ModelProviders[0].Model != "gpt-4.1" {
+		t.Errorf("ModelProviders = %+v, want the example's three routes in order", cfg.Gateway.ModelProviders)
+	}
+	if len(cfg.Gateway.FailoverOrder) != 3 || cfg.Gateway.FailoverOrder[0] != "openai" {
+		t.Errorf("FailoverOrder = %v, want the example's", cfg.Gateway.FailoverOrder)
+	}
+	if cfg.Auth.Audience != "llm-gateway" || cfg.Auth.Issuer == "" {
+		t.Errorf("Auth = %+v, want the example's identity terms", cfg.Auth)
+	}
+	if cfg.JWKS.URL == "" || cfg.JWKS.RefreshInterval != 5*time.Minute {
+		t.Errorf("JWKS = %+v, want the example's refresh tuning", cfg.JWKS)
+	}
+
+	agent := cfg.Auth.Apps["system:serviceaccount:llm:agent-service"]
+	if agent.Name != "agent-service" || agent.Policy.Kind != gateway.PolicySameModel || agent.TotalDeadline != 150*time.Second {
+		t.Errorf("agent-service = %+v, want its declared terms", agent)
+	}
+	bot := cfg.Auth.Apps["system:serviceaccount:llm:support-bot"]
+	if bot.Policy.Kind != gateway.PolicyAllowlist || len(bot.Policy.Allowlist) != 2 {
+		t.Errorf("support-bot policy = %+v, want its two named substitutes", bot.Policy)
+	}
+	if rag := cfg.Auth.Apps["system:serviceaccount:llm:rag-api"]; rag.Policy.Kind != gateway.PolicyAny {
+		t.Errorf("rag-api policy = %+v, want any", rag.Policy)
+	}
+
+	if cfg.Limits["agent-service"] != (AppLimits{RPS: 5, TokensPerMinute: 500000, MaxInFlight: 300}) {
+		t.Errorf("agent-service limits = %+v, want the example's three currencies", cfg.Limits["agent-service"])
+	}
+	if cfg.GlobalMaxInFlight != 800 {
+		t.Errorf("GlobalMaxInFlight = %d, want 800", cfg.GlobalMaxInFlight)
+	}
+	if cfg.Redis.Addr == "" || cfg.SecretSource.Kind != "file" || cfg.Telemetry.MetricsListen != ":9090" {
+		t.Errorf("infra sections = %+v %+v %+v, want the example's", cfg.Redis, cfg.SecretSource, cfg.Telemetry)
+	}
+}
+
+func TestLocalOperatorFileStillParsesWhenPresent(t *testing.T) {
+	// config/config.yaml is the operator's, gitignored — but its header
+	// promises validation whenever it exists, so schema changes can't
+	// silently strand a local setup.
+	const local = "../../config/config.yaml"
+	if _, err := os.Stat(local); os.IsNotExist(err) {
+		t.Skip("no local operator file — nothing to hold to the schema")
+	}
+	if _, err := Load(local); err != nil {
+		t.Errorf("the local operator file no longer parses — the schema moved without it: %v", err)
+	}
+}
+
+func TestUnknownKeyFailsTheBoot(t *testing.T) {
+	wantBootFailure(t, "server:\n  adress: \":8080\"", "adress")
+}
+
+func TestTypoedPolicyIsRejectedNotReinterpreted(t *testing.T) {
+	// The core reads an unknown kind as same-model — conservative at
+	// runtime, a silent policy change at boot. The file refuses it.
+	wantBootFailure(t, `apps: {a: {subject: s, failover_policy: alowlist}}`, "alowlist")
+	wantBootFailure(t, `apps: {a: {subject: s, failover_policy: {alowlist: [m]}}}`, "allowlist")
+}
+
+func TestOmittedPolicyIsSameModel(t *testing.T) {
+	cfg, err := Load(write(t, `apps: {a: {subject: s}}`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Auth.Apps["s"].Policy.Kind != gateway.PolicySameModel {
+		t.Error("an app declaring no policy must get same-model — substitution is opt-in")
+	}
+}
+
+func TestEmptyAllowlistIsRejected(t *testing.T) {
+	wantBootFailure(t, `apps: {a: {subject: s, failover_policy: {allowlist: []}}}`, "names no substitutes")
+}
+
+func TestAllowlistEntriesMustBeRouted(t *testing.T) {
+	wantBootFailure(t, `
+routes:
+  - {model: gpt-4.1, provider: openai, endpoint: "https://api.openai.com/v1"}
+apps:
+  a: {subject: s, failover_policy: {allowlist: [claude-sonnet-4]}}
+`, "no route serves it")
+}
+
+func TestDuplicateSubjectIsRejected(t *testing.T) {
+	wantBootFailure(t, `apps: {a: {subject: s}, b: {subject: s}}`, "already belongs to")
+}
+
+func TestMissingSubjectIsRejected(t *testing.T) {
+	wantBootFailure(t, `apps: {a: {}}`, "subject is required")
+}
+
+func TestAppCannotExceedTheGlobalCeiling(t *testing.T) {
+	wantBootFailure(t, `
+server: {global_max_in_flight: 100}
+apps:
+  a: {subject: s, limits: {max_in_flight: 200}}
+`, "exceeds global_max_in_flight")
+}
+
+func TestIncompleteRouteIsRejected(t *testing.T) {
+	wantBootFailure(t, `routes: [{model: gpt-4.1, provider: openai}]`, "routes[0]")
+}
+
+func TestBadDurationNamesItself(t *testing.T) {
+	wantBootFailure(t, `server: {total_deadline: "ninety seconds"}`, "ninety seconds")
+	wantBootFailure(t, `server: {total_deadline: 90}`, "missing unit")
+}
+
+func TestOmittedTuningTakesConsumerDefaults(t *testing.T) {
+	cfg, err := Load(write(t, `{}`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.Addr != "" || cfg.Server.WriteTimeout != 0 {
+		t.Errorf("Server = %+v, want zero values — api.New owns the defaults", cfg.Server)
+	}
+	if cfg.JWKS.RefreshInterval != defaultRefreshInterval {
+		t.Errorf("RefreshInterval = %v, want the %v default", cfg.JWKS.RefreshInterval, defaultRefreshInterval)
+	}
+}
+
+func TestMissingFileIsAnError(t *testing.T) {
+	if _, err := Load("/nowhere/gateway.yaml"); err == nil {
+		t.Error("Load must report a missing file, not invent a config")
+	}
+}

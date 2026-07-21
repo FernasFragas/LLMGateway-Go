@@ -9,6 +9,16 @@ server:
   total_deadline: 30s             # default per-request budget (apps may override)
   per_try_deadline: 10s           # per provider attempt; must be < total_deadline
 
+# Caller identity: bound ServiceAccount tokens, verified locally against the
+# cluster's JWKS (fail static — no TokenReview on the request path). Each
+# app below names its subject; the kubelet projects the matching token:
+#   serviceAccountToken: { audience: llm-gateway, path: token }
+auth:
+  issuer: https://kubernetes.default.svc.cluster.local   # kubectl get --raw /.well-known/openid-configuration | jq .issuer
+  audience: llm-gateway
+  jwks_url: https://kubernetes.default.svc/openid/v1/jwks
+  refresh_interval: 5m            # failed refresh keeps serving cached keys; rotation lands within one interval
+
 # Routes registry: which endpoint serves which model — transport facts only.
 # The gateway never declares two models interchangeable (see non-goals).
 routes:
@@ -32,7 +42,7 @@ failover_order: [openai, anthropic, ollama]
 #   failover_policy: { allowlist: [m1, m2] }      — app-named substitutes, in order
 apps:
   rag-api:
-    api_key_ref: RAG_API_KEY      # hash or secret-store pointer, never the raw key
+    subject: system:serviceaccount:llm:rag-api
     limits:
       rps: 60
       tokens_per_minute: 200000
@@ -40,7 +50,7 @@ apps:
     failover_policy: any
 
   agent-service:
-    api_key_ref: AGENT_SERVICE_KEY
+    subject: system:serviceaccount:llm:agent-service
     total_deadline: 150s          # long tool-calling runs (30-120 s) need a bigger budget
     limits:
       rps: 5
@@ -49,7 +59,7 @@ apps:
     failover_policy: same-model   # no substitutes, ever — its recorded trade
 
   support-bot:
-    api_key_ref: SUPPORT_BOT_KEY
+    subject: system:serviceaccount:llm:support-bot
     limits:
       rps: 10
       tokens_per_minute: 50000
@@ -62,7 +72,7 @@ redis:
 
 secret_source:
   kind: file                       # or: vault
-  path: /etc/gateway/keys          # provider keys + app keys
+  path: /etc/gateway/keys          # provider keys only — app identity is the ServiceAccount token
   refresh_interval: 5m             # key cache TTL — staleness alert threshold
 
 telemetry:
