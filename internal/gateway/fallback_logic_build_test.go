@@ -90,6 +90,6 @@ func TestPlanModelsProvidersLeavesTheTableUntouched(t *testing.T) {
 	buildModelsProvidersFallback("claude-sonnet-4", anyModel(), table, briefOrder)
 
 	if !reflect.DeepEqual(table, snapshot) {
-		t.Errorf("planModelsProviders reordered the shared model-providers table: %v", table)
+		t.Errorf("planModelsProviders reordered the model-providers table: %v", table)
 	}
 }
