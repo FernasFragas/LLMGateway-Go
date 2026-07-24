@@ -1,0 +1,6 @@
+# The unit you can delete to reset the whole experiment. Everything below
+# lives here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: llm

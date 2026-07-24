@@ -13,5 +13,6 @@ secrets/
 bin/
 
 coverage.html
+coverage.out
 
 .env

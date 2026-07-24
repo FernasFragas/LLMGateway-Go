@@ -1,0 +1,31 @@
+# The build needs the Go module and source, nothing else. Everything excluded
+# here either bloats the context, invalidates the cache needlessly, or must
+# never end up in an image layer.
+
+# Secrets and operator-local config — never bake these into the image. Config
+# arrives at runtime from a ConfigMap; keys from a mounted secret.
+secrets/
+config/config.yaml
+.env
+
+# Version control and IDE state.
+.git/
+.gitignore
+.idea/
+.vscode/
+
+# Build artifacts (the image builds its own binary).
+/gateway
+bin/
+coverage.html
+
+# Docs and repo scaffolding the compiler never reads.
+docs/
+README.md
+TODO.md
+Makefile
+openapi.yaml
+.spectral.yaml
+.github/
+Dockerfile
+.dockerignore

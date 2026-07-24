@@ -1,0 +1,77 @@
+# The pod spec — where the code's assumptions become the platform's contract.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-gateway
+  namespace: llm
+  labels:
+    app: llm-gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: llm-gateway
+  template:
+    metadata:
+      labels:
+        app: llm-gateway
+    spec:
+      # The pod runs as its own identity; this is what mounts the projected
+      # token + cluster CA the JWKS client reads.
+      serviceAccountName: llm-gateway
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: llm-gateway:dev
+          # kind load puts the image in the node directly; never try a registry.
+          imagePullPolicy: IfNotPresent
+          args: ["-config", "/etc/gateway/config.yaml"]
+          ports:
+            - name: http
+              containerPort: 8080
+          # readiness failing routes traffic AWAY (fail-closed, harms nothing) —
+          # a cold pod with no keys says "not ready" instead of serving 401s.
+          # liveness failing RESTARTS the pod, so it probes only true process
+          # health; Live() is unconditional precisely so a down dependency
+          # never triggers a restart.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            # Requests let the scheduler reason about placement; the memory
+            # limit caps a noisy neighbor. No CPU limit on purpose — throttling
+            # a latency-sensitive proxy hurts more than it protects.
+            requests:
+              cpu: 250m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true  # the gateway writes only to stdout
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/gateway
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: llm-gateway-config

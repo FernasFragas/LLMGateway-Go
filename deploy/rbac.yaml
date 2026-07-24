@@ -1,0 +1,17 @@
+# The deploy-time half of the step-4 fix. The JWKS discovery endpoints
+# (/.well-known/openid-configuration and /openid/v1/jwks) are RBAC-gated;
+# binding the built-in system:service-account-issuer-discovery ClusterRole to
+# the gateway's SA is what lets its token read them. Without this, the code
+# still gets 403 — permission is granted in YAML, never in Go.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: llm-gateway-issuer-discovery
+subjects:
+  - kind: ServiceAccount
+    name: llm-gateway
+    namespace: llm
+roleRef:
+  kind: ClusterRole
+  name: system:service-account-issuer-discovery
+  apiGroup: rbac.authorization.k8s.io

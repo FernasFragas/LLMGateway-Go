@@ -1,0 +1,20 @@
+# The stable name openapi.yaml already promises:
+# llm-gateway.llm.svc.cluster.local. ClusterIP because the gateway is
+# in-cluster only (no CORS, no ingress by decision). Only pods that pass the
+# readiness probe become endpoints here — that is what protects callers from
+# an instance that would 401 everyone.
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-gateway
+  namespace: llm
+  labels:
+    app: llm-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app: llm-gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

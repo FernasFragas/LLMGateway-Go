@@ -1,0 +1,82 @@
+# The in-cluster config.yaml, mounted read-only at /etc/gateway/config.yaml by
+# the Deployment. A ConfigMap because config must change without an image
+# rebuild — the schema lives in config.example.yaml (the tested fixture); this
+# is that schema with in-cluster hostnames filled in.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-gateway-config
+  namespace: llm
+data:
+  config.yaml: |
+    server:
+      listen: ":8080"
+      max_body_bytes: 524288          # 512 KB — enforced with 413
+      global_max_in_flight: 800       # protects process memory
+      total_deadline: 30s             # default per-request budget (apps may override)
+      per_try_deadline: 10s           # per provider attempt; must be < total_deadline
+      # WriteTimeout must exceed the largest app total_deadline, or the server
+      # kills completions the core still considers within budget. agent-service
+      # below runs to 150s, so the api default (90s) is too short here.
+      write_timeout: 160s
+
+    # Caller identity: bound ServiceAccount tokens verified locally against the
+    # cluster JWKS (fail static — no TokenReview on the request path).
+    auth:
+      issuer: https://kubernetes.default.svc.cluster.local
+      audience: llm-gateway
+      jwks_url: https://kubernetes.default.svc/openid/v1/jwks
+      refresh_interval: 5m
+
+    # Routes registry: which endpoint serves which model — transport facts only.
+    routes:
+      - model: gpt-4.1
+        provider: openai
+        endpoint: https://api.openai.com/v1
+      - model: claude-sonnet-4
+        provider: anthropic
+        endpoint: https://api.anthropic.com/v1
+      - model: llama3
+        provider: ollama
+        endpoint: http://ollama.llm.svc.cluster.local:11434
+
+    failover_order: [openai, anthropic, ollama]
+
+    apps:
+      rag-api:
+        subject: system:serviceaccount:llm:rag-api
+        limits:
+          rps: 60
+          tokens_per_minute: 200000
+          max_in_flight: 600          # <= global_max_in_flight
+        failover_policy: any
+
+      agent-service:
+        subject: system:serviceaccount:llm:agent-service
+        total_deadline: 150s          # long tool-calling runs need a bigger budget
+        limits:
+          rps: 5
+          tokens_per_minute: 500000
+          max_in_flight: 300
+        failover_policy: same-model   # no substitutes, ever — its recorded trade
+
+      support-bot:
+        subject: system:serviceaccount:llm:support-bot
+        limits:
+          rps: 10
+          tokens_per_minute: 50000
+          max_in_flight: 50
+        failover_policy:
+          allowlist: [gpt-4.1, claude-sonnet-4]   # every entry must exist in routes
+
+    redis:
+      addr: redis.llm.svc.cluster.local:6379      # quotas + breaker state only (fail open)
+
+    secret_source:
+      kind: file
+      path: /etc/gateway/keys          # provider keys only — app identity is the SA token
+      refresh_interval: 5m
+
+    telemetry:
+      otlp_endpoint: otel-collector.observability.svc.cluster.local:4317
+      metrics_listen: ":9090"

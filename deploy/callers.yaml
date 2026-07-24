@@ -1,0 +1,20 @@
+# The caller identities — the subjects the config's apps name. Without these
+# SAs existing, `kubectl create token <name> -n llm --audience=llm-gateway`
+# has nothing to mint from, and there is no way to exercise the auth path.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-service
+  namespace: llm
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rag-api
+  namespace: llm
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: support-bot
+  namespace: llm
