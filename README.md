@@ -70,7 +70,7 @@ release.
   staleness is measurable.
 - **Every acceptance criterion is a runnable test.** `make verify`.
 
-## Design
+## Design - Hexagonal architecture.
 
 `internal/gateway` holds the policy — admit, route, fail over — in domain
 vocabulary, and declares the interfaces it needs. Everything technological
@@ -124,27 +124,6 @@ graph LR
     SVC2 --> DEC["logs/gateway<br/>one decorator per port"]
     DEC --> ADP["the real adapter<br/>auth · providers · limiters"]
 ```
-
-<details>
-<summary>Detailed explanation</summary>
-
-**A hexagon architecture.** `internal/gateway` is the core: admitting, routing, and failing
-over completions, written in domain vocabulary with no HTTP, no SDKs, no
-Redis. It declares five ports in the package that *consumes* them —
-`AppDirectory`, `RateLimiter`, `SlotLimiter`, `ProviderClient`,
-`UsageRecorder`. Adapters implement them and translate at the edges:
-`internal/api` (HTTP), `internal/openai` · `anthropic` · `ollama` (providers),
-`internal/auth` (ServiceAccount tokens verified against cached JWKS).
-Dependencies point inward, always — adapters import the core, never the
-reverse — so swapping a provider or a transport never reaches the logic.
-
-**Decorators for everything cross-cutting.** No logging, metrics, or tracing is
-written inline. Each lives in a package mirroring what it wraps —
-`internal/logs/gateway`, `internal/metrics/api` — implementing the same port it
-decorates and delegating through, with `main` composing the stack. The result:
-observability is testable in isolation, and the core reads as pure business.
-
-</details>
 
 The reasoning behind the failure modes, the capacity math, and the decisions
 they commit to lives in
