@@ -2,7 +2,29 @@
 One front door for every LLM. Unified API over OpenAI / Anthropic / Ollama
 with per-app failover policies, rate + slot limiting, and full cost visibility.
 
-![img.png](docs/design/context_diagram.png)
+```mermaid
+graph LR
+    RAG[RAG API] -->|"HTTP/JSON + bound SA token"| GW
+    AGENT[Agent service] -->|"HTTP/JSON + bound SA token"| GW
+    PROM[Prometheus] -->|scrapes /metrics| GW
+
+    GW["LLMGateway-Go<br/>auth (JWKS cache), rate limiting,<br/>routing, fallback, observability"]
+
+    subgraph PROVIDERS["LLM Providers - failover order (per app policy)"]
+        P1["1. OpenAI-compatible API"]
+        P2["2. Anthropic-compatible API"]
+        P3["3. Ollama (local / dev)"]
+    end
+
+    GW -->|HTTPS| P1
+    GW -->|HTTPS| P2
+    GW -->|"HTTP, local"| P3
+
+    GW -->|"OTLP traces + logs"| OTEL[OTel Collector]
+    GW -.->|"quotas + breaker state (fail open)"| REDIS[("Redis")]
+    GW -.->|"signing keys: startup load + TTL refresh (fail static)"| JWKS[("kube-apiserver JWKS")]
+    GW -.->|"provider keys: startup load + TTL refresh (fail static)"| SECRETS[("Secret source")]
+```
 
 ## Why it's interesting 
 - Failover is a contract: apps declare same-model / allowlist / any —

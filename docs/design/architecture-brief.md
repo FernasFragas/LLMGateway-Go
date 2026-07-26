@@ -111,13 +111,13 @@ Honest consequence, today: with the current three providers, no model is served 
 
 ### Core behavior
 
-- Chat completion works. POST /v1/chat with a valid body and key returns 200 with non-empty message and an X-Correlation-ID header. Violated by non-200, empty content, or a missing header.
+- Chat completion works. POST /v1/chat with a valid body and a valid ServiceAccount token returns 200 with non-empty message and an X-Correlation-ID header. Violated by non-200, empty content, or a missing header.
 - Malformed input is rejected before any provider is contacted. POST /v1/chat with an invalid body returns 400 with the unified error body naming the parse error; the provider request counter is unchanged. Violated by any 5xx or an upstream call.
 - The served model is always disclosed. Every 200 response's `model` field names the model that actually produced it. Violated if a response ever claims the requested model while another served it.
 
 ### Auth & limits
 
-- Auth is enforced. A request without a valid API key returns 401 with the unified error body and is never forwarded. Violated by anything but 401, or an incremented provider counter.
+- Auth is enforced. A request without a valid bound ServiceAccount token — missing, expired, wrong audience, wrong issuer, or signed by a key not in the JWKS cache — returns 401 with the unified error body and is never forwarded. Violated by anything but 401, or an incremented provider counter.
 - Rate limiting is enforced. Sending quota+1 requests in one window returns 429 with a Retry-After header on the final request. Violated if no 429 arrives, or it arrives early.
 - Slot ceilings are enforced. With one app holding its max in-flight slots on long calls, its next request returns 429 with Retry-After while another app's simultaneous request returns 200 within the overhead budget; `in_flight{app}` and `concurrency_limit_rejections_total{app}` reflect it. Violated if the over-ceiling request is admitted, or the other app's request is delayed or rejected.
 - Provider keys live only in the gateway (loaded from the secret source), never in app code or logs.
@@ -133,7 +133,7 @@ Honest consequence, today: with the current three providers, no model is served 
 
 - Traceability is end-to-end. A request sent with X-Correlation-ID: test-123 echoes the ID in the response, and a log query, metric exemplar, and trace lookup for test-123 all hit. Violated if the ID is absent from any signal.
 - Usage is recorded. After one request, /metrics shows llm_tokens_total{app,provider} incremented and a latency histogram observation. Violated if counters are unchanged.
-- Health reflects dependencies. GET /healthz returns 200 {"status":"ok"}. With the secret source stopped: an instance with a warm key cache keeps serving (fail static) and its `key_cache_age_seconds` gauge rises; a freshly restarted instance with no cache never reports ready, so no traffic is routed to it. Violated if a warm instance goes unready during a secret-source outage, or a cold instance with no keys receives traffic.
+- Health reflects dependencies, per cache and independently. GET /healthz returns 200 {"status":"ok"}. With the secret source stopped: a warm instance keeps serving (fail static) and `provider_key_cache_age_seconds` rises; a freshly restarted instance that never read the secret source never reports ready. With the JWKS endpoint stopped, the same two behaviors hold against `jwks_cache_age_seconds`. Each cache gates readiness on its own — a stalled secret source must not mark the JWKS cache unready, or vice versa. Violated if a warm instance goes unready during either outage, if a cold instance receives traffic, or if a deployment whose routes are all self-hosted (no provider key configured at all) fails readiness — an empty provider key set is a valid steady state, not a cold cache.
 
 ## Failure Modes
 
@@ -152,7 +152,7 @@ Honest consequence, today: with the current three providers, no model is served 
 |---|---|---|---|---|---|
 | Caller sends invalid JSON | Deterministic | JSON decode fails before any provider is contacted | Reject immediately; never forwarded | 400, unified error naming the parse error | Same input → same result; retrying masks a caller bug |
 | Caller sends oversized body | Deterministic | Body exceeds configured max during read | Reject before buffering the rest | 413, unified error stating the limit | Deterministic — the body won't shrink |
-| Invalid API key | Deterministic | Auth check fails against key cache | Reject; never forwarded | 401, unified error | Deterministic until the caller fixes their key |
+| Caller's ServiceAccount token is invalid, expired, or wrong-audience | Deterministic | Local JWT verification fails against the cached JWKS — signature, issuer, audience, or expiry | Reject; never forwarded | 401, unified error | Deterministic until the kubelet projects a fresh token; a TokenReview call would add a request-path dependency on the apiserver for the same answer |
 | Caller over quota | Deterministic | Rate limiter counter exceeded | Reject; never forwarded | 429, unified error with quota info | Deterministic until the window resets; that's the caller's backoff job |
 | App at slot ceiling | Deterministic | Per-app in-flight semaphore exhausted | Reject; never forwarded; increment `concurrency_limit_rejections_total` | 429 + Retry-After, unified error naming the ceiling | Deterministic until one of the app's own slots frees — queueing inside the gateway would hide the starvation instead of pricing it |
 | Caller disconnects mid-request | Deterministic | Inbound context canceled (`context.Canceled`) | Abort outbound call (stop *future* token spend); increment `unobserved_spend_tokens_estimate` — upstream may bill what was already generated; log `client_disconnected` | Nothing — caller is gone; traceable via correlation ID | No one left to answer; a retry spends tokens nobody receives |
@@ -163,15 +163,17 @@ Honest consequence, today: with the current three providers, no model is served 
 | Provider returns 200 but garbage (malformed/truncated/schema mismatch) | Provider-scoped | Response decode/schema validation fails | Treat as provider failure; fail over once per policy; log raw sample; increment `double_spend_risk_total` | 200 via fallback; 502 naming invalid upstream response | The primary already billed for the garbage — failover knowingly pays twice (decision #6); the alternative is charging the caller's latency budget and returning nothing for tokens already burned |
 | Provider slow but under deadline | Provider-scoped | Per-provider latency histogram degrades | Nothing per-request; health score demotes provider for *new* requests | Slower 200s until routing adjusts | Nothing failed — acting per-request would trade a slow success for an uncertain one |
 | All providers exhausted | Gateway / global | All policy-eligible attempts failed | Return unified error; raise an alert | 502, unified error body | No healthy path left; retrying from inside only burns the caller's remaining timeout |
-| Stale key cache (secret source unreachable past TTL) | Gateway-internal | Key refresh job errors; cache-age gauge exceeds TTL | **Fail static** — serve last-known-good keys; alert on staleness age | Nothing different; a revoked key keeps working until refresh succeeds | Staleness is bounded and visible; retrying a dead secret source in the request path adds latency, not truth |
-| Cold start with secret source down (no key cache) | Gateway / global | Startup key load fails; readiness never passes | Instance refuses readiness; traffic goes to healthy instances | Nothing — traffic never reaches the unready instance | With no keys there is no basis to authenticate anyone; failing closed at startup harms zero in-flight traffic |
-| Redis (quotas + breaker state) down | Gateway-internal | Limiter/breaker calls error or time out | **Fail open** + raise an alert; no breaker state = try primary normally | Normal 200; quota temporarily unenforced | Availability over enforcement — keys are unaffected by design, so no shared fate with auth |
+| Stale JWKS cache (cluster JWKS endpoint unreachable past TTL) | Gateway-internal | JWKS refresh job errors; `jwks_cache_age_seconds` exceeds TTL | **Fail static** — keep verifying against last-known-good signing keys; alert on staleness age | Nothing, until the cluster rotates its signing key: tokens signed by the new key hit an unknown `kid` and are refused 401 | Staleness is bounded and visible; fetching JWKS on the request path adds latency and a hard dependency on the apiserver being up |
+| Stale provider key cache (secret source unreachable past TTL) | Gateway-internal | Provider key refresh job errors; `provider_key_cache_age_seconds` exceeds TTL | **Fail static** — keep sending last-known-good provider keys; alert on staleness age | Nothing, until the provider revokes the stale key — then that provider's calls fail upstream and failover carries the load | Staleness is bounded and visible; retrying a dead secret source in the request path adds latency, not truth |
+| Cold start with the JWKS endpoint down (signing keys never loaded) | Gateway / global | Startup JWKS load fails; readiness never passes | Instance refuses readiness; traffic goes to healthy instances | Nothing — traffic never reaches the unready instance | With no signing keys there is no basis to authenticate anyone; failing closed at startup harms zero in-flight traffic |
+| Cold start with secret source down (provider keys never loaded) | Gateway / global | Startup secret-source read fails; readiness never passes | Instance refuses readiness; traffic goes to healthy instances | Nothing — traffic never reaches the unready instance | With no provider keys there is no basis to call any provider that needs one. The gate is *never read successfully*, not *read and empty* — an empty key set is legitimate when every route is self-hosted (in-cluster Ollama), so emptiness must not fail readiness |
+| Redis (quotas + breaker state) down | Gateway-internal | Limiter/breaker calls error or time out | **Fail open** + raise an alert; no breaker state = try primary normally | Normal 200; quota temporarily unenforced | Availability over enforcement — neither key cache lives in Redis by design, so no shared fate with auth |
 | Gateway process exhaustion (memory, FDs, pool) | Gateway / global | Accept/dial errors, OOM kill, liveness probe fails | Kubernetes restarts the pod; body caps + slot caps bound the blast radius | Connection reset or 503 from the Service during restart | The retrying component is the one that's broken — recovery is external (the orchestrator) |
 | Metrics/log sink down | Gateway-internal | Telemetry export errors | Buffer, then drop with an internal alert; never blocks request path | Nothing different | Observability must never gate the data path |
 
 ## Design decisions this table commits us to
 
-1. **Auth fails static, rate limiting fails open — and they must not share a failure domain.** Keys live in gateway memory (startup load + TTL refresh from the secret source); quota and breaker counters live in Redis. A Redis outage degrades enforcement, never availability. Only a cold start with the secret source down fails closed — at readiness, where no traffic is harmed. (If keys and quotas shared one store, a single outage would trigger both policies and fail-closed would win — the asymmetry would be unreachable.)
+1. **Auth fails static, rate limiting fails open — and they must not share a failure domain.** Two *separate* caches live in gateway memory, each loaded at startup and refreshed on its own TTL, each failing static: the **JWKS cache** holds the cluster's token-signing keys (from `auth.jwks_url`) and is the only thing that authenticates a caller; the **provider key cache** holds outbound provider credentials (from `secret_source`) and authenticates nobody — it is spent on the gateway's own calls to OpenAI and Anthropic. They are not one mechanism with two uses: inbound identity comes from the kube-apiserver, outbound credentials from the secret source, and neither outage implies the other. Quota and breaker counters live in Redis. A Redis outage degrades enforcement, never availability. Only a cold start fails closed, and only at readiness where no traffic is harmed: an instance that has never loaded signing keys cannot authenticate anyone, and one that has never read the secret source cannot call a provider that needs a key. (If keys and quotas shared one store, a single outage would trigger both policies and fail-closed would win — the asymmetry would be unreachable.)
 2. **One failover attempt, total-deadline bounded** — never a second attempt at the same provider; per-try deadlines must not stack past the caller's budget.
 3. **Caller disconnect aborts the upstream call** — cost control: never pay for tokens nobody will receive.
 4. **Provider errors are never leaked raw** — every caller-visible error is the unified body + correlation ID; upstream 429s are never presented as the caller's fault.
@@ -181,15 +183,13 @@ Honest consequence, today: with the current three providers, no model is served 
 
 ## Context Diagram
 
-![img.png](context_diagram.png)
-
 ```mermaid
 graph LR
-    RAG[RAG API] -->|HTTP/JSON + API key| GW
-    AGENT[Agent service] -->|HTTP/JSON + API key| GW
+    RAG[RAG API] -->|"HTTP/JSON + bound SA token"| GW
+    AGENT[Agent service] -->|"HTTP/JSON + bound SA token"| GW
     PROM[Prometheus] -->|scrapes /metrics| GW
 
-    GW["LLMGateway-Go<br/>auth (in-memory keys), rate limiting,<br/>routing, fallback, observability"]
+    GW["LLMGateway-Go<br/>auth (JWKS cache), rate limiting,<br/>routing, fallback, observability"]
 
     subgraph PROVIDERS["LLM Providers - failover order (per app policy)"]
         P1["1. OpenAI-compatible API"]
@@ -203,7 +203,8 @@ graph LR
 
     GW -->|"OTLP traces + logs"| OTEL[OTel Collector]
     GW -.->|"quotas + breaker state (fail open)"| REDIS[("Redis")]
-    GW -.->|"keys: startup load + TTL refresh (fail static)"| SECRETS[("Secret source")]
+    GW -.->|"signing keys: startup load + TTL refresh (fail static)"| JWKS[("kube-apiserver JWKS")]
+    GW -.->|"provider keys: startup load + TTL refresh (fail static)"| SECRETS[("Secret source")]
 ```
 
 ## Non Goals
