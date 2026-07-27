@@ -9,19 +9,19 @@ import (
 func TestFailedRefreshIsLoggedAndTheErrorStillReturned(t *testing.T) {
 	log, out := captured(t)
 	outage := errors.New("jwks endpoint: connection refused")
-	refresh := NewKeyRefresher(refreshing{err: outage}, log)
+	refresh := NewJWKSRefresher(refreshing{err: outage}, log)
 
 	err := refresh.Refresh(context.Background())
 
 	if !errors.Is(err, outage) {
 		t.Errorf("error = %v, want the cache's own, unchanged — the decorator observes, never handles", err)
 	}
-	wantLogged(t, out, "service-account key refresh failed", "connection refused")
+	wantLogged(t, out, "jwks refresh failed", "connection refused")
 }
 
 func TestSuccessfulRefreshPassesThroughSilently(t *testing.T) {
 	log, out := captured(t)
-	refresh := NewKeyRefresher(refreshing{}, log)
+	refresh := NewJWKSRefresher(refreshing{}, log)
 
 	if err := refresh.Refresh(context.Background()); err != nil {
 		t.Fatalf("Refresh = %v, want nil passed through", err)
@@ -29,7 +29,7 @@ func TestSuccessfulRefreshPassesThroughSilently(t *testing.T) {
 	wantSilence(t, out)
 }
 
-// refreshing is a stub key cache failing with the given error.
+// refreshing is a stub JWKS cache failing with the given error.
 type refreshing struct {
 	err error
 }

@@ -27,7 +27,10 @@ func NewChecker() *Checker {
 }
 
 // AddReadiness registers a named condition that must hold for Ready to
-// pass — e.g. "key-cache" reporting whether any API keys are loaded.
+// pass — e.g. "jwks" reporting whether the cluster's signing keys have ever
+// loaded. The name is what an operator reads when readiness refuses, so it
+// names the source, not the shape: "jwks" and "provider-keys" are two
+// conditions, never one "key-cache".
 func (c *Checker) AddReadiness(name string, check Check) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
