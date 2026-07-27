@@ -54,9 +54,34 @@ type Redis struct {
 }
 
 // SecretSource locates the provider keys — app identity is the
-// ServiceAccount token and needs no secret here.
+// ServiceAccount token and needs no secret here. One entry per provider that
+// needs a credential: a provider absent from Providers has no key, and its
+// adapter sends no auth header. That absence is how a self-hosted, in-cluster
+// Ollama route is declared, so it is a valid steady state rather than a
+// misconfiguration.
 type SecretSource struct {
-	Kind            string
+	Kind      string
+	Vault     Vault
+	Providers map[string]ProviderSecret
+}
+
+// Vault is how the gateway reaches HashiCorp Vault when Kind is "vault": it
+// trades its own projected ServiceAccount token for a Vault token through the
+// Kubernetes auth method, so no credential has to be distributed in order to
+// read credentials.
+type Vault struct {
+	Address  string
+	Role     string
+	AuthPath string
+}
+
+// ProviderSecret is one provider's credential location and its own refresh
+// cadence. The cadences are independent because a shared source could only be
+// scheduled once, which would make every interval but the shortest
+// decorative. Path is the literal path read — for Vault that includes KV v2's
+// `data/` segment, so a wrong mount fails as a visible 404 rather than a
+// silent client-side rewrite.
+type ProviderSecret struct {
 	Path            string
 	RefreshInterval time.Duration
 }
@@ -155,7 +180,19 @@ type redisWire struct {
 }
 
 type secretSourceWire struct {
-	Kind            string   `yaml:"kind"`
+	Kind            string                        `yaml:"kind"`
+	RefreshInterval duration                      `yaml:"refresh_interval"`
+	Vault           vaultWire                     `yaml:"vault"`
+	Providers       map[string]providerSecretWire `yaml:"providers"`
+}
+
+type vaultWire struct {
+	Address  string `yaml:"address"`
+	Role     string `yaml:"role"`
+	AuthPath string `yaml:"auth_path"`
+}
+
+type providerSecretWire struct {
 	Path            string   `yaml:"path"`
 	RefreshInterval duration `yaml:"refresh_interval"`
 }
@@ -176,18 +213,19 @@ func (w wire) toDomain() (Config, error) {
 
 	providers := make([]gateway.ModelProvider, 0, len(w.Routes))
 	routedModels := make(map[string]bool, len(w.Routes))
+	routedProviders := make(map[string]bool, len(w.Routes))
 	for i, r := range w.Routes {
 		if r.Model == "" || r.Provider == "" || r.Endpoint == "" {
 			return Config{}, fmt.Errorf("routes[%d]: model, provider, and endpoint are all required", i)
 		}
 		providers = append(providers, gateway.ModelProvider{Model: r.Model, Provider: r.Provider, Endpoint: r.Endpoint})
 		routedModels[r.Model] = true
+		routedProviders[r.Provider] = true
 	}
 
-	switch w.SecretSource.Kind {
-	case "", "file", "vault":
-	default:
-		return Config{}, fmt.Errorf("secret_source.kind %q is not file or vault", w.SecretSource.Kind)
+	secrets, err := w.SecretSource.toDomain(routedProviders)
+	if err != nil {
+		return Config{}, err
 	}
 
 	// Map iteration is random; sorted names keep boot errors deterministic.
@@ -255,13 +293,80 @@ func (w wire) toDomain() (Config, error) {
 		Limits:            limits,
 		GlobalMaxInFlight: w.Server.GlobalMaxInFlight,
 		Redis:             Redis{Addr: w.Redis.Addr},
-		SecretSource: SecretSource{
-			Kind:            w.SecretSource.Kind,
-			Path:            w.SecretSource.Path,
-			RefreshInterval: time.Duration(w.SecretSource.RefreshInterval),
-		},
-		Telemetry: Telemetry{OTLPEndpoint: w.Telemetry.OTLPEndpoint, MetricsListen: w.Telemetry.MetricsListen},
+		SecretSource:      secrets,
+		Telemetry:         Telemetry{OTLPEndpoint: w.Telemetry.OTLPEndpoint, MetricsListen: w.Telemetry.MetricsListen},
 	}, nil
+}
+
+// defaultVaultAuthPath is where Vault mounts the Kubernetes auth method
+// unless an operator moved it.
+const defaultVaultAuthPath = "auth/kubernetes"
+
+// toDomain validates the secret source against the routes that would spend
+// its credentials. Absence is meaningful here — a provider with no entry has
+// no key by design — which is exactly why a name that matches no route is
+// rejected rather than ignored: silently, a typo'd `opanai:` and a
+// deliberately self-hosted provider look identical, and the first only
+// surfaces as 401s from an upstream nobody is watching yet.
+func (w secretSourceWire) toDomain(routedProviders map[string]bool) (SecretSource, error) {
+	switch w.Kind {
+	case "", "file", "vault":
+	default:
+		return SecretSource{}, fmt.Errorf("secret_source.kind %q is not file or vault", w.Kind)
+	}
+	if w.Kind == "" && len(w.Providers) > 0 {
+		return SecretSource{}, errors.New("secret_source.kind is required when providers are configured — nothing else says how to read them")
+	}
+
+	blockInterval := time.Duration(w.RefreshInterval)
+	switch {
+	case blockInterval < 0:
+		return SecretSource{}, errors.New("secret_source.refresh_interval must be positive")
+	case blockInterval == 0:
+		blockInterval = defaultRefreshInterval
+	}
+
+	vault := Vault(w.Vault)
+	switch {
+	case w.Kind == "vault":
+		if vault.Address == "" || vault.Role == "" {
+			return SecretSource{}, errors.New("secret_source.vault: address and role are required when kind is vault")
+		}
+		if vault.AuthPath == "" {
+			vault.AuthPath = defaultVaultAuthPath
+		}
+	case vault != Vault{}:
+		return SecretSource{}, fmt.Errorf("secret_source.vault is set but kind is %q — a block that would never be read is a mistake, not a spare", w.Kind)
+	}
+
+	// Map iteration is random; sorted names keep boot errors deterministic.
+	names := make([]string, 0, len(w.Providers))
+	for name := range w.Providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	secrets := make(map[string]ProviderSecret, len(w.Providers))
+	for _, name := range names {
+		p := w.Providers[name]
+		if p.Path == "" {
+			return SecretSource{}, fmt.Errorf("secret_source.providers[%q]: path is required", name)
+		}
+		if !routedProviders[name] {
+			return SecretSource{}, fmt.Errorf("secret_source.providers[%q]: no route names that provider", name)
+		}
+
+		interval := time.Duration(p.RefreshInterval)
+		switch {
+		case interval < 0:
+			return SecretSource{}, fmt.Errorf("secret_source.providers[%q].refresh_interval must be positive", name)
+		case interval == 0:
+			interval = blockInterval
+		}
+		secrets[name] = ProviderSecret{Path: p.Path, RefreshInterval: interval}
+	}
+
+	return SecretSource{Kind: w.Kind, Vault: vault, Providers: secrets}, nil
 }
 
 // policyWire accepts the file's three policy forms: "any", "same-model", or

@@ -51,8 +51,97 @@ func TestExampleFileIsTheExecutableSchema(t *testing.T) {
 	if cfg.GlobalMaxInFlight != 800 {
 		t.Errorf("GlobalMaxInFlight = %d, want 800", cfg.GlobalMaxInFlight)
 	}
-	if cfg.Redis.Addr == "" || cfg.SecretSource.Kind != "file" || cfg.Telemetry.MetricsListen != ":9090" {
+	if cfg.Redis.Addr == "" || cfg.SecretSource.Kind != "vault" || cfg.Telemetry.MetricsListen != ":9090" {
 		t.Errorf("infra sections = %+v %+v %+v, want the example's", cfg.Redis, cfg.SecretSource, cfg.Telemetry)
+	}
+
+	if cfg.SecretSource.Vault.Role == "" || cfg.SecretSource.Vault.AuthPath != "auth/kubernetes" {
+		t.Errorf("Vault = %+v, want the example's Kubernetes auth terms", cfg.SecretSource.Vault)
+	}
+	// Ollama is absent on purpose: the in-cluster route needs no credential.
+	if _, keyed := cfg.SecretSource.Providers["ollama"]; keyed || len(cfg.SecretSource.Providers) != 2 {
+		t.Errorf("Providers = %+v, want only the two that need a key", cfg.SecretSource.Providers)
+	}
+	if got := cfg.SecretSource.Providers["openai"].RefreshInterval; got != time.Minute {
+		t.Errorf("openai cadence = %v, want its own 1m override, not the block default", got)
+	}
+	if got := cfg.SecretSource.Providers["anthropic"].RefreshInterval; got != 5*time.Minute {
+		t.Errorf("anthropic cadence = %v, want the block's 5m inherited", got)
+	}
+}
+
+func TestProviderSecretMustNameARoutedProvider(t *testing.T) {
+	// Absence is meaningful here — no entry means no credential — so a typo
+	// and a deliberately keyless provider are indistinguishable once dropped.
+	// The file refuses rather than leaving it to surface as upstream 401s.
+	wantBootFailure(t, `
+routes:
+  - {model: gpt-4.1, provider: openai, endpoint: "https://api.openai.com/v1"}
+secret_source:
+  kind: file
+  providers: {opanai: {path: ./secrets/openai}}
+`, "no route names that provider")
+}
+
+func TestVaultBlockWithoutVaultKindIsRefused(t *testing.T) {
+	wantBootFailure(t, `
+secret_source:
+  kind: file
+  vault: {address: "https://vault:8200", role: llm-gateway}
+`, "would never be read")
+}
+
+func TestVaultKindDemandsItsAddressAndRole(t *testing.T) {
+	wantBootFailure(t, "secret_source:\n  kind: vault", "address and role are required")
+}
+
+func TestProviderSecretDemandsAPath(t *testing.T) {
+	wantBootFailure(t, `
+routes:
+  - {model: gpt-4.1, provider: openai, endpoint: "https://api.openai.com/v1"}
+secret_source:
+  kind: file
+  providers: {openai: {refresh_interval: 1m}}
+`, "path is required")
+}
+
+func TestProvidersWithoutAKindAreRefused(t *testing.T) {
+	wantBootFailure(t, `
+routes:
+  - {model: gpt-4.1, provider: openai, endpoint: "https://api.openai.com/v1"}
+secret_source:
+  providers: {openai: {path: ./secrets/openai}}
+`, "kind is required")
+}
+
+func TestNoSecretSourceConfiguredIsValid(t *testing.T) {
+	// Every route self-hosted: having nothing to fetch is a steady state.
+	cfg, err := Load(write(t, `
+routes:
+  - {model: llama3, provider: ollama, endpoint: "http://localhost:11434"}
+`))
+	if err != nil {
+		t.Fatalf("a gateway whose routes need no credentials must load: %v", err)
+	}
+	if len(cfg.SecretSource.Providers) != 0 {
+		t.Errorf("Providers = %+v, want none", cfg.SecretSource.Providers)
+	}
+}
+
+func TestOmittedProviderCadenceInheritsTheBlockDefault(t *testing.T) {
+	cfg, err := Load(write(t, `
+routes:
+  - {model: gpt-4.1, provider: openai, endpoint: "https://api.openai.com/v1"}
+secret_source:
+  kind: file
+  refresh_interval: 90s
+  providers: {openai: {path: ./secrets/openai}}
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.SecretSource.Providers["openai"].RefreshInterval; got != 90*time.Second {
+		t.Errorf("cadence = %v, want the block's 90s — an omitted interval inherits, never zero", got)
 	}
 }
 
