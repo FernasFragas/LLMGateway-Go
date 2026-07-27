@@ -21,7 +21,7 @@ const (
 	tokenFileName = "token"
 )
 
-// NewFetchClient builds the http.Client the KeyCache uses to reach the
+// NewFetchClient builds the http.Client the JWKSCache uses to reach the
 // in-cluster JWKS endpoint, solving the two failures a default client hits
 // against kube-apiserver: trust and authorization.
 //

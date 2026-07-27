@@ -15,11 +15,11 @@ import (
 
 const defaultFetchTimeout = 10 * time.Second
 
-// KeyCache holds the cluster's ServiceAccount public keys, fetched from the
+// JWKSCache holds the cluster's ServiceAccount public keys, fetched from the
 // JWKS endpoint and cached in memory. The request path only ever reads the
 // cache; Refresh is the one method that touches the network, and a failed
 // Refresh keeps the previous keys — stale-but-usable, never unavailable.
-type KeyCache struct {
+type JWKSCache struct {
 	url    string
 	client *http.Client
 
@@ -27,10 +27,10 @@ type KeyCache struct {
 	keys map[string]*rsa.PublicKey // by kid
 }
 
-// NewKeyCache prepares a cache for the given JWKS URL; a nil client means a
+// NewJWKSCache prepares a cache for the given JWKS URL; a nil client means a
 // default one with a 10s timeout. The cache starts empty — not ready — until
 // the first successful Refresh.
-func NewKeyCache(jwksURL string, client *http.Client) (*KeyCache, error) {
+func NewJWKSCache(jwksURL string, client *http.Client) (*JWKSCache, error) {
 	if jwksURL == "" {
 		return nil, errors.New("auth: JWKS URL is required")
 	}
@@ -38,7 +38,7 @@ func NewKeyCache(jwksURL string, client *http.Client) (*KeyCache, error) {
 		client = &http.Client{Timeout: defaultFetchTimeout}
 	}
 
-	return &KeyCache{url: jwksURL, client: client}, nil
+	return &JWKSCache{url: jwksURL, client: client}, nil
 }
 
 // jwksWire is the JWKS document, RSA members only — the rest are skipped,
@@ -55,7 +55,7 @@ type jwksWire struct {
 // Refresh fetches the JWKS document and replaces the cached keys — only on
 // success, and only when the document holds at least one usable key: an
 // endpoint answering garbage must not empty a working cache.
-func (c *KeyCache) Refresh(ctx context.Context) error {
+func (c *JWKSCache) Refresh(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
 	if err != nil {
 		return fmt.Errorf("auth: build JWKS request: %w", err)
@@ -100,7 +100,7 @@ func (c *KeyCache) Refresh(ctx context.Context) error {
 
 // Ready is health.Check-shaped: a cache that has never loaded keys refuses
 // readiness, the same fail-closed cold start the key cache had before.
-func (c *KeyCache) Ready(context.Context) error {
+func (c *JWKSCache) Ready(context.Context) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -112,7 +112,7 @@ func (c *KeyCache) Ready(context.Context) error {
 }
 
 // key returns the cached public key for kid.
-func (c *KeyCache) key(kid string) (*rsa.PublicKey, bool) {
+func (c *JWKSCache) key(kid string) (*rsa.PublicKey, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 

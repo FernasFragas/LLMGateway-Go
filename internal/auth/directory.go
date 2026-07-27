@@ -28,10 +28,10 @@ type Config struct {
 // memory alone — fail static, exactly as AppDirectory demands.
 type Directory struct {
 	cfg  Config
-	keys *KeyCache
+	keys *JWKSCache
 }
 
-func NewDirectory(cfg Config, keys *KeyCache) (*Directory, error) {
+func NewDirectory(cfg Config, keys *JWKSCache) (*Directory, error) {
 	switch {
 	case cfg.Issuer == "":
 		return nil, errors.New("auth: Issuer is required")
@@ -40,7 +40,7 @@ func NewDirectory(cfg Config, keys *KeyCache) (*Directory, error) {
 	case len(cfg.Apps) == 0:
 		return nil, errors.New("auth: at least one app must be named")
 	case keys == nil:
-		return nil, errors.New("auth: KeyCache is required")
+		return nil, errors.New("auth: JWKSCache is required")
 	}
 
 	return &Directory{cfg: cfg, keys: keys}, nil

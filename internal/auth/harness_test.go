@@ -102,8 +102,8 @@ func jwksServer(t *testing.T, body []byte) *httptest.Server {
 	return srv
 }
 
-// warmCache is a KeyCache that has fetched the signer's keys once.
-func warmCache(t *testing.T, s *signer) *KeyCache {
+// warmCache is a JWKSCache that has fetched the signer's keys once.
+func warmCache(t *testing.T, s *signer) *JWKSCache {
 	t.Helper()
 	cache := coldCache(t, jwksServer(t, s.jwks()).URL)
 	if err := cache.Refresh(context.Background()); err != nil {
@@ -112,11 +112,11 @@ func warmCache(t *testing.T, s *signer) *KeyCache {
 	return cache
 }
 
-func coldCache(t *testing.T, url string) *KeyCache {
+func coldCache(t *testing.T, url string) *JWKSCache {
 	t.Helper()
-	cache, err := NewKeyCache(url, nil)
+	cache, err := NewJWKSCache(url, nil)
 	if err != nil {
-		t.Fatalf("NewKeyCache: %v", err)
+		t.Fatalf("NewJWKSCache: %v", err)
 	}
 	return cache
 }
@@ -127,7 +127,7 @@ func agentApp() gateway.App {
 }
 
 // directory binds the standard issuer, audience, and app table to the cache.
-func directory(t *testing.T, cache *KeyCache) *Directory {
+func directory(t *testing.T, cache *JWKSCache) *Directory {
 	t.Helper()
 	d, err := NewDirectory(Config{
 		Issuer:   testIssuer,
