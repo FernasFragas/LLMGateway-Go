@@ -1,14 +1,15 @@
 // Command gateway runs the LLM gateway server. run() composes the process
 // from the pieces the rest of the tree already ships — config.Load, the
-// identity chain (newAppDirectory + refreshKeys), and newServer for the edge.
-// The provider and limiter adapters do not exist yet, so run() wires named
-// placeholders (see TODO step 0): with no model behind the core, a minted
-// token earning a 502 instead of a 401 proves the entire auth path works.
+// identity chain (newAppDirectory + refreshJWKS), and newServer for the edge.
+// newProviderClient builds the credential cache, the three dialect adapters,
+// and the router that picks one per route; newLimiters builds both metered
+// currencies. Every port the core declares now has a real adapter behind it,
+// and each fails the way its own decision says it must: identity static,
+// quotas open, slots exact.
 package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"log/slog"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/FernasFragas/LLMGateway-Go/internal/anthropic"
 	"github.com/FernasFragas/LLMGateway-Go/internal/api"
 	"github.com/FernasFragas/LLMGateway-Go/internal/auth"
 	"github.com/FernasFragas/LLMGateway-Go/internal/config"
@@ -26,6 +28,12 @@ import (
 	authlogs "github.com/FernasFragas/LLMGateway-Go/internal/logs/auth"
 	gwlogs "github.com/FernasFragas/LLMGateway-Go/internal/logs/gateway"
 	"github.com/FernasFragas/LLMGateway-Go/internal/metrics/api"
+	"github.com/FernasFragas/LLMGateway-Go/internal/ollama"
+	"github.com/FernasFragas/LLMGateway-Go/internal/openai"
+	"github.com/FernasFragas/LLMGateway-Go/internal/providers"
+	"github.com/FernasFragas/LLMGateway-Go/internal/redis"
+	"github.com/FernasFragas/LLMGateway-Go/internal/secrets"
+	"github.com/FernasFragas/LLMGateway-Go/internal/slots"
 )
 
 // newServer is the one place the layers meet. The api package never logs or
@@ -61,9 +69,9 @@ func newServer(cfg api.Config, core api.ChatService, checker *health.Checker,
 // cache feeding the verifier, readiness registered fail-closed on the
 // checker (a cold pod takes no traffic instead of refusing every token),
 // and the unknown-caller log wrapped around the directory. The returned
-// KeyCache is handed to refreshKeys — the request path itself never touches
+// JWKSCache is handed to refreshJWKS — the request path itself never touches
 // the network.
-func newAppDirectory(cfg config.Config, checker *health.Checker, log *slog.Logger) (gateway.AppDirectory, *auth.KeyCache, error) {
+func newAppDirectory(cfg config.Config, checker *health.Checker, log *slog.Logger) (gateway.AppDirectory, *auth.JWKSCache, error) {
 	// In a pod this client trusts the cluster CA and carries the gateway's own
 	// SA token to the RBAC-gated JWKS endpoint; outside one it is a plain
 	// default client, so local dev stays unconfigured. The environment, not a
@@ -73,7 +81,7 @@ func newAppDirectory(cfg config.Config, checker *health.Checker, log *slog.Logge
 		return nil, nil, err
 	}
 
-	keys, err := auth.NewKeyCache(cfg.JWKS.URL, client)
+	keys, err := auth.NewJWKSCache(cfg.JWKS.URL, client)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -83,17 +91,17 @@ func newAppDirectory(cfg config.Config, checker *health.Checker, log *slog.Logge
 		return nil, nil, err
 	}
 
-	checker.AddReadiness("service-account-keys", keys.Ready)
+	checker.AddReadiness("jwks", keys.Ready)
 
 	return gwlogs.NewAppDirectory(dir, log), keys, nil
 }
 
-// refreshKeys keeps the cache warm until ctx ends: once immediately, so
+// refreshJWKS keeps the cache warm until ctx ends: once immediately, so
 // readiness turns green as soon as the issuer answers, then every interval —
 // each attempt through the logs decorator, because a failed refresh serves
 // stale keys silently and the log line is the only signal.
-func refreshKeys(ctx context.Context, keys *auth.KeyCache, interval time.Duration, log *slog.Logger) {
-	refresh := authlogs.NewKeyRefresher(keys, log)
+func refreshJWKS(ctx context.Context, keys *auth.JWKSCache, interval time.Duration, log *slog.Logger) {
+	refresh := authlogs.NewJWKSRefresher(keys, log)
 	_ = refresh.Refresh(ctx)
 
 	tick := time.NewTicker(interval)
@@ -152,17 +160,29 @@ func run() error {
 	}
 	// Keep the key cache warm until ctx ends; the first refresh turns readiness
 	// green as soon as the issuer answers.
-	go refreshKeys(ctx, keys, cfg.JWKS.RefreshInterval, log)
+	go refreshJWKS(ctx, keys, cfg.JWKS.RefreshInterval, log)
 
-	// The core, driven by named placeholders standing in for the adapters that
-	// have not landed. Each is wrapped in its logs decorator so the
-	// placeholder's behavior is as observable as the real adapter will be —
-	// the seam does not change when the scaffolding is replaced.
+	provider, err := newProviderClient(ctx, cfg, checker, log)
+	if err != nil {
+		log.Error("failed to build provider client", "error", err)
+		return err
+	}
+
+	// Both currencies, each in the store its failure mode demands: quotas in
+	// Redis so an app's rps is one budget across replicas (and fails open when
+	// it is down), slots in this process because a semaphore cannot fail and
+	// the global cap's job is bounding this process's memory.
+	quotas, slotting, err := newLimiters(cfg)
+	if err != nil {
+		log.Error("failed to build limiters", "error", err)
+		return err
+	}
+
 	core, err := gateway.New(cfg.Gateway, gateway.Deps{
 		Apps:        dir,
-		RateLimiter: gwlogs.NewRateLimiter(allowAllLimiter{}, log),
-		Slots:       gwlogs.NewSlotLimiter(unboundedSlots{}, log),
-		Provider:    gwlogs.NewProviderClient(unreachableProvider{}, log),
+		RateLimiter: gwlogs.NewRateLimiter(quotas, log),
+		Slots:       gwlogs.NewSlotLimiter(slotting, log),
+		Provider:    gwlogs.NewProviderClient(provider, log),
 		Usage:       gwlogs.NewUsageRecorder(log),
 	})
 	if err != nil {
@@ -227,41 +247,129 @@ const (
 	drainGrace = 10 * time.Second
 )
 
-// ─── step-0 placeholders ────────────────────────────────────────────────────
+// newProviderClient assembles the outbound half: the credential cache its
+// sources describe, the three dialect adapters each holding an accessor into
+// that cache rather than a copied string, and the router that picks one by the
+// route's provider name.
 //
-// These are scaffolding with a purpose, not stubs to forget. gateway.New
-// requires a ProviderClient and both limiters; none of those adapters exist
-// yet. Wiring honest placeholders lets the whole identity path run in a
-// cluster with no model behind it — a minted token reaching the core and
-// earning a 502 (not a 401) is the proof the auth chain works end to end.
-// Each is replaced, one at a time, by a real adapter behind the same port.
+// The cache's readiness joins the checker under its own name, beside "jwks":
+// the two fail independently by design, and a stalled secret store must not
+// mark the signing keys unready (decision #1). Its refresh loops run per
+// provider, each on its own cadence.
+func newProviderClient(ctx context.Context, cfg config.Config, checker *health.Checker, log *slog.Logger) (gateway.ProviderClient, error) {
+	fetcher, err := newFetcher(cfg.SecretSource)
+	if err != nil {
+		return nil, err
+	}
 
-// unreachableProvider answers every attempt with an honest unreachable fault,
-// so a fully authorized request surfaces as 502 upstream_failed rather than
-// pretending to serve.
-type unreachableProvider struct{}
+	sources := make(map[string]secrets.Source, len(cfg.SecretSource.Providers))
+	for provider, src := range cfg.SecretSource.Providers {
+		sources[provider] = secrets.Source{Path: src.Path, RefreshInterval: src.RefreshInterval}
+	}
 
-func (unreachableProvider) Complete(context.Context, gateway.ModelProvider, gateway.ChatRequest) (gateway.Completion, error) {
-	return gateway.Completion{}, &gateway.ProviderFault{
-		Kind:  gateway.FaultUnreachable,
-		Cause: errors.New("no provider adapter wired yet"),
+	keys, err := secrets.New(fetcher, sources)
+	if err != nil {
+		return nil, err
+	}
+	checker.AddReadiness("provider-keys", keys.Ready)
+
+	// Load once before serving, then per provider on its own timer. A failed
+	// first load is not fatal: readiness holds the pod out of rotation, and
+	// the loops keep trying — a secret store that is late must not turn into a
+	// crash loop.
+	if err := keys.RefreshAll(ctx); err != nil {
+		log.Warn("initial provider key load incomplete; readiness gates until a source answers", "error", err)
+	}
+	for _, provider := range keys.Providers() {
+		go refreshProviderKey(ctx, keys, provider, log)
+	}
+
+	// Each adapter is handed an accessor, never a string: a key rotates under
+	// a running pod, and a copy taken here would freeze at boot (ADR-001).
+	client := &http.Client{}
+	return providers.NewRouter(map[string]gateway.ProviderClient{
+		"openai":    openai.NewOpenAI(client, keys.Key("openai")),
+		"anthropic": anthropic.NewAnthropic(client, keys.Key("anthropic")),
+		"ollama":    ollama.NewOllama(client, keys.Key("ollama")),
+	}, func(provider string) {
+		// Decision #8: the rejection is evidence the cache is stale. This
+		// returns immediately — the refresh happens off the request path.
+		if keys.TriggerRefresh(provider) {
+			log.Warn("provider refused our credential; refreshing out of band", "provider", provider)
+		}
+	})
+}
+
+// newFetcher picks how credentials are read. Both kinds ship; an unknown kind
+// never reaches here, the config loader having refused the file already.
+func newFetcher(src config.SecretSource) (secrets.Fetcher, error) {
+	switch src.Kind {
+	case "vault":
+		return secrets.NewVault(nil, secrets.VaultConfig{
+			Address:  src.Vault.Address,
+			Role:     src.Vault.Role,
+			AuthPath: src.Vault.AuthPath,
+		})
+	case "file":
+		return secrets.NewFile(), nil
+	default:
+		// No kind and no providers: every route is self-hosted and there is
+		// nothing to read. secrets.New rejects the contradictory case.
+		return nil, nil
 	}
 }
 
-// allowAllLimiter admits every request: the rate/token quota adapter (Redis)
-// has not landed, and admitting-everything is the correct scaffold — it never
-// refuses a request the real limiter might have allowed.
-type allowAllLimiter struct{}
+// refreshProviderKey keeps one provider's credential current until ctx ends,
+// on that provider's own cadence — the reason the sources fan out at all. A
+// failed refresh keeps the last known good key and logs; it never empties the
+// cache and never stops the loop.
+func refreshProviderKey(ctx context.Context, keys *secrets.Cache, provider string, log *slog.Logger) {
+	interval := keys.Interval(provider)
+	if interval <= 0 {
+		return
+	}
 
-func (allowAllLimiter) Allow(context.Context, string) (gateway.RateDecision, error) {
-	return gateway.RateDecision{Allowed: true}, nil
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			if err := keys.Refresh(ctx, provider); err != nil && ctx.Err() == nil {
+				log.Warn("provider key refresh failed; serving the cached credential",
+					"provider", provider, "error", err.Error())
+			}
+		}
+	}
 }
 
-// unboundedSlots hands out a slot to every caller: the in-flight limiter has
-// not landed, and a never-full ceiling is the matching scaffold. release is a
-// no-op because nothing is being counted.
-type unboundedSlots struct{}
+// newLimiters builds both metered currencies from the app blocks. Zero in any
+// limit means that currency is unmetered for that app — the convention
+// global_max_in_flight already uses, applied to both limiters so one caller
+// cannot be treated inconsistently across currencies.
+//
+// The Redis client dials lazily: a quota store that is down must not stop the
+// gateway from booting, because rate limiting fails open and identity does not
+// depend on it (decision #1).
+func newLimiters(cfg config.Config) (gateway.RateLimiter, gateway.SlotLimiter, error) {
+	rps := make(map[string]int, len(cfg.Limits))
+	ceilings := make(map[string]int, len(cfg.Limits))
+	for app, limits := range cfg.Limits {
+		rps[app] = limits.RPS
+		ceilings[app] = limits.MaxInFlight
+	}
 
-func (unboundedSlots) TryAcquire(string) (release func(), ceiling int, ok bool) {
-	return func() {}, 0, true
+	client, err := redis.NewClient(cfg.Redis.Addr, redisPoolSize)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return redis.NewLimiter(client, rps), slots.New(cfg.GlobalMaxInFlight, ceilings), nil
 }
+
+// redisPoolSize is small on purpose: the brief budgets ~3 ops per request
+// against a store nowhere near its limits, so connections are reused rather
+// than multiplied.
+const redisPoolSize = 8
