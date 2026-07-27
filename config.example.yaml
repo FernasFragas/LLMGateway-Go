@@ -70,10 +70,37 @@ apps:
 redis:
   addr: redis.llm.svc.cluster.local:6379      # quotas + breaker state only (fail open)
 
+# Provider keys — outbound credentials only; app identity is the ServiceAccount
+# token and needs nothing here. One source per provider, each on its own cadence:
+# a shared source could only be scheduled once, which would make every interval
+# but the shortest decorative (ADR-001). A provider absent from `providers` has
+# no credential and its adapter sends no auth header — that is how the
+# in-cluster Ollama route is declared, not an oversight.
 secret_source:
-  kind: file                       # or: vault
-  path: /etc/gateway/keys          # provider keys only — app identity is the ServiceAccount token
-  refresh_interval: 5m             # key cache TTL — staleness alert threshold
+  kind: vault                      # or: file — then each path is a file path
+  refresh_interval: 5m             # default cadence; entries below may override
+
+  # Kubernetes auth: the gateway trades its own projected ServiceAccount token
+  # for a Vault token, so no credential has to be distributed to read
+  # credentials. The Vault token leases and is renewed on its own schedule,
+  # independent of the per-provider cadences below.
+  vault:
+    address: https://vault.vault.svc.cluster.local:8200
+    role: llm-gateway              # Vault role bound to this pod's ServiceAccount
+    auth_path: auth/kubernetes     # mount point of the Kubernetes auth method
+
+  # Paths are literal read paths, `data/` included for a KV v2 mount — a wrong
+  # mount version fails as a visible 404 rather than a silent client rewrite.
+  # The key itself lives under the field `key`, by convention, in every secret.
+  providers:
+    openai:
+      path: secret/data/llm/openai
+      refresh_interval: 1m         # rotates hourly upstream — chase it
+    anthropic:
+      path: secret/data/llm/anthropic     # inherits the 5m default
+    # ollama: absent on purpose — in-cluster and unauthenticated. Ollama Cloud
+    # would be a second provider name (see ADR-001, question 6), with its own
+    # entry here and its own route.
 
 telemetry:
   otlp_endpoint: otel-collector.observability.svc.cluster.local:4317

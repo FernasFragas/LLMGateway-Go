@@ -1,6 +1,10 @@
 # Operator-local configuration — config.example.yaml is the committed schema.
-config/config.yaml
-secrets/
+/config/config.yaml
+# The operator's local credential files, at the repo root only. The leading
+# slash matters: unanchored, `secrets/` matches a directory of that name at
+# any depth and would silently swallow internal/secrets — the package, not a
+# credential — leaving it out of every commit.
+/secrets/
 
 # Build artifacts
 /gateway

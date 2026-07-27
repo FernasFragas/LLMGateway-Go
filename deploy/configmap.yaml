@@ -72,10 +72,17 @@ data:
     redis:
       addr: redis.llm.svc.cluster.local:6379      # quotas + breaker state only (fail open)
 
+    # Provider keys only — app identity is the SA token. One source per
+    # provider; ollama is absent because the in-cluster route needs no
+    # credential.
     secret_source:
       kind: file
-      path: /etc/gateway/keys          # provider keys only — app identity is the SA token
-      refresh_interval: 5m
+      refresh_interval: 5m             # default cadence; entries may override
+      providers:
+        openai:
+          path: /etc/gateway/keys/openai
+        anthropic:
+          path: /etc/gateway/keys/anthropic
 
     telemetry:
       otlp_endpoint: otel-collector.observability.svc.cluster.local:4317

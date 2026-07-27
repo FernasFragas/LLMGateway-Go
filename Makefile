@@ -68,8 +68,10 @@ lint-spec:                    ## the spec is a fixture: built-in + gateway-* con
 contract-test:                ## fuzz the RUNNING gateway against the spec (providers stubbed)
 	@# schemathesis derives test cases from the schema and checks every response
 	@# conforms — including that errors match ErrorBody and headers are present.
+	@# TEST_APP_TOKEN is a projected ServiceAccount token, not an issued key:
+	@#   export TEST_APP_TOKEN=$$(kubectl create token rag-api -n llm --audience=llm-gateway)
 	st run $(OPENAPI) --base-url http://localhost:$(PORT) \
-	  --header "Authorization: Bearer $$TEST_APP_KEY" \
+	  --header "Authorization: Bearer $$TEST_APP_TOKEN" \
 	  --checks all --hypothesis-max-examples=200
 
 # ─── housekeeping ───────────────────────────────────────────────────────────
