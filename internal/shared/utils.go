@@ -36,6 +36,27 @@ import (
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
 )
 
+// Key resolves the credential to send, and is called once per request —
+// never captured at construction. Provider keys rotate under a running pod:
+// each has its own source and cadence, and an upstream 401 schedules an
+// out-of-band refresh (ADR-001). An adapter holding a string copied at
+// wiring time would keep sending the rotated-out key until the process
+// restarted — the load-once-never-refresh design that ADR exists to reject.
+//
+// An empty return means "send no credential". That is a steady state, not an
+// error: a self-hosted, in-cluster Ollama route is authenticated by the
+// network it sits on, and has no key to configure.
+type Key func() string
+
+// NoKey is the Key for a route that needs no credential, and the fallback
+// when an adapter is constructed with a nil Key.
+func NoKey() string { return "" }
+
+// StaticKey is a Key that never changes — for a fixed credential and for
+// tests. Production wiring passes the secret cache's accessor instead, or
+// rotation stops at the adapter's door.
+func StaticKey(key string) Key { return func() string { return key } }
+
 // TransportFault classifies a request that produced no response: the
 // per-try deadline firing is a timeout; everything else — DNS, TLS, refused
 // connections — is unreachable, zero bytes sent.
@@ -54,8 +75,14 @@ func TransportFault(err error) *gateway.ProviderFault {
 // here is billing, and a refusal bills nothing.
 func StatusFault(provider string, status int, body []byte) *gateway.ProviderFault {
 	kind := gateway.FaultServerError
-	if status == http.StatusTooManyRequests {
+	switch status {
+	case http.StatusTooManyRequests:
 		kind = gateway.FaultThrottled
+	case http.StatusUnauthorized, http.StatusForbidden:
+		// The provider refused *our* credential, not the caller's. Naming it
+		// separately is what lets the wiring schedule a key refresh instead
+		// of waiting out the interval (decision #8).
+		kind = gateway.FaultRejected
 	}
 
 	return &gateway.ProviderFault{

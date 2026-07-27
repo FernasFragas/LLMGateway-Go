@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
+
+	"github.com/FernasFragas/LLMGateway-Go/internal/shared"
 )
 
 const servedAnthropic = `{
@@ -152,7 +154,7 @@ func TestToolChoiceNoneSendsTheWiresOwnNoneValue(t *testing.T) {
 	req := chatRequest()
 	req.ToolChoice = &gateway.ToolChoice{Mode: gateway.ToolChoiceNone}
 
-	if _, err := NewAnthropic(nil, "sk-ant-test").Complete(context.Background(), modelProvider(srv), req); err != nil {
+	if _, err := NewAnthropic(nil, shared.StaticKey("sk-ant-test")).Complete(context.Background(), modelProvider(srv), req); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 
@@ -177,7 +179,7 @@ func TestToolChoiceFunctionForcesTheNamedTool(t *testing.T) {
 	req := chatRequest()
 	req.ToolChoice = &gateway.ToolChoice{Mode: gateway.ToolChoiceFunction, Function: "get_weather"}
 
-	if _, err := NewAnthropic(nil, "sk-ant-test").Complete(context.Background(), modelProvider(srv), req); err != nil {
+	if _, err := NewAnthropic(nil, shared.StaticKey("sk-ant-test")).Complete(context.Background(), modelProvider(srv), req); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 
@@ -272,9 +274,10 @@ func TestRefusalsAreStatusFaults(t *testing.T) {
 		status int
 		kind   gateway.FaultKind
 	}{
-		"invalid api key is a server fault": {http.StatusUnauthorized, gateway.FaultServerError},
-		"5xx is a server fault":             {http.StatusInternalServerError, gateway.FaultServerError},
-		"429 keeps its own kind":            {http.StatusTooManyRequests, gateway.FaultThrottled},
+		"a refused gateway key is its own fault, so a refresh can be scheduled": {http.StatusUnauthorized, gateway.FaultRejected},
+		"a forbidden gateway key is refused the same way":                       {http.StatusForbidden, gateway.FaultRejected},
+		"5xx is a server fault":  {http.StatusInternalServerError, gateway.FaultServerError},
+		"429 keeps its own kind": {http.StatusTooManyRequests, gateway.FaultThrottled},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv, _ := serving(t, tc.status, `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`)
@@ -297,7 +300,7 @@ func TestPerTryDeadlineIsATimeoutFault(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
-	_, err := NewAnthropic(nil, "sk-ant-test").Complete(ctx, modelProvider(srv), chatRequest())
+	_, err := NewAnthropic(nil, shared.StaticKey("sk-ant-test")).Complete(ctx, modelProvider(srv), chatRequest())
 
 	wantFault(t, err, gateway.FaultTimeout)
 }

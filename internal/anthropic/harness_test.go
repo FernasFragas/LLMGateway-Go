@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
+
+	"github.com/FernasFragas/LLMGateway-Go/internal/shared"
 )
 
 // chatRequest exercises every translatable field: a system turn, sampling
@@ -92,5 +94,5 @@ func wantFault(t *testing.T, err error, kind gateway.FaultKind) *gateway.Provide
 
 func complete(t *testing.T, srv *httptest.Server) (gateway.Completion, error) {
 	t.Helper()
-	return NewAnthropic(nil, "sk-ant-test").Complete(context.Background(), modelProvider(srv), chatRequest())
+	return NewAnthropic(nil, shared.StaticKey("sk-ant-test")).Complete(context.Background(), modelProvider(srv), chatRequest())
 }

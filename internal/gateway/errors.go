@@ -57,6 +57,14 @@ const (
 	FaultServerError FaultKind = "server_error" // response status >= 500
 	FaultThrottled   FaultKind = "throttled"    // provider-side 429 — never presented as the caller's fault
 	FaultBadResponse FaultKind = "bad_response" // 200 but malformed, truncated, or schema-mismatched
+	// FaultRejected is the provider refusing the gateway's own credential
+	// (401/403). It recovers like any other provider-scoped failure — one
+	// failover, per the app's policy — but it is distinguishable because it
+	// is the only fault a *refresh* can fix: the adapter layer treats it as
+	// evidence the key cache is stale and schedules an out-of-band reload
+	// (decision #8). It never reaches the caller as their own 401; the two
+	// mean opposite things.
+	FaultRejected FaultKind = "rejected"
 )
 
 // ProviderFault is how a provider adapter reports an upstream failure in the

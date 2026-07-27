@@ -24,18 +24,22 @@ const maxResponseBytes = 10 << 20
 // arguments are already a JSON-encoded string on both sides.
 type OpenAI struct {
 	client *http.Client
-	apiKey string
+	key    shared.Key
 }
 
 // NewOpenAI wraps client; nil means http.DefaultClient — deadlines come
-// from the per-try context, not the client. apiKey is sent as a Bearer
-// token on every request.
-func NewOpenAI(client *http.Client, apiKey string) *OpenAI {
+// from the per-try context, not the client. key is resolved on every
+// request and sent as a Bearer token, so a rotation reaches the wire within
+// one request instead of waiting for a restart (ADR-001); nil means none.
+func NewOpenAI(client *http.Client, key shared.Key) *OpenAI {
 	if client == nil {
 		client = http.DefaultClient
 	}
+	if key == nil {
+		key = shared.NoKey
+	}
 
-	return &OpenAI{client: client, apiKey: apiKey}
+	return &OpenAI{client: client, key: key}
 }
 
 func (o *OpenAI) Complete(ctx context.Context, mp gateway.ModelProvider, req gateway.ChatRequest) (gateway.Completion, error) {
@@ -49,7 +53,7 @@ func (o *OpenAI) Complete(ctx context.Context, mp gateway.ModelProvider, req gat
 		return gateway.Completion{}, shared.BadResponseFault("openai", fmt.Errorf("build request: %w", err), nil)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+o.apiKey)
+	httpReq.Header.Set("Authorization", "Bearer "+o.key())
 
 	resp, err := o.client.Do(httpReq)
 	if err != nil {

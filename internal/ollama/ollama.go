@@ -24,25 +24,26 @@ const maxResponseBytes = 10 << 20
 // string.
 type Ollama struct {
 	client *http.Client
-	apiKey string
+	key    shared.Key
 }
 
 // NewOllama wraps client; nil means http.DefaultClient — deadlines come
 // from the per-try context, not the client.
 //
-// apiKey selects the auth mode by its presence, not a flag: a self-hosted,
+// key selects the auth mode by its presence, not a flag: a self-hosted,
 // in-cluster instance (http://ollama…:11434) needs no credential, so an
 // empty key sends no Authorization header — today's behavior, now explicit;
 // Ollama Cloud (https://ollama.com) is Bearer-authenticated, so a non-empty
 // key rides on every request. Whether a given route is self-hosted or cloud
 // is decided by its Endpoint at wiring time, and the matching key (or none)
-// is resolved and handed in here — see ADR-001.
-func NewOllama(client *http.Client, apiKey string) *Ollama {
+// is resolved and handed in here. key is called per request, so a rotation
+// reaches the wire without a restart — see ADR-001.
+func NewOllama(client *http.Client, key shared.Key) *Ollama {
 	if client == nil {
 		client = http.DefaultClient
 	}
 
-	return &Ollama{client: client, apiKey: apiKey}
+	return &Ollama{client: client, key: key}
 }
 
 func (o *Ollama) Complete(ctx context.Context, mp gateway.ModelProvider, req gateway.ChatRequest) (gateway.Completion, error) {
@@ -58,8 +59,8 @@ func (o *Ollama) Complete(ctx context.Context, mp gateway.ModelProvider, req gat
 	httpReq.Header.Set("Content-Type", "application/json")
 	// Bearer only when a key is configured (Ollama Cloud); a self-hosted
 	// endpoint gets no Authorization header at all — see ADR-001.
-	if o.apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+o.apiKey)
+	if key := o.key(); key != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+key)
 	}
 
 	resp, err := o.client.Do(httpReq)

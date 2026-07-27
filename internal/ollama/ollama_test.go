@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
+
+	"github.com/FernasFragas/LLMGateway-Go/internal/shared"
 )
 
 const servedOllama = `{
@@ -72,7 +74,7 @@ func TestSelfHostedSendsNoAuthorizationHeader(t *testing.T) {
 	srv, rec := serving(t, http.StatusOK, servedOllama)
 
 	// Empty key = self-hosted, in-cluster instance: no credential to send.
-	if _, err := NewOllama(nil, "").Complete(context.Background(), modelProvider(srv), chatRequest()); err != nil {
+	if _, err := NewOllama(nil, shared.StaticKey("")).Complete(context.Background(), modelProvider(srv), chatRequest()); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 
@@ -85,7 +87,7 @@ func TestCloudKeyRidesAsABearerToken(t *testing.T) {
 	srv, rec := serving(t, http.StatusOK, servedOllama)
 
 	// A configured key = Ollama Cloud: Bearer on every request.
-	if _, err := NewOllama(nil, "sk-ollama-test").Complete(context.Background(), modelProvider(srv), chatRequest()); err != nil {
+	if _, err := NewOllama(nil, shared.StaticKey("sk-ollama-test")).Complete(context.Background(), modelProvider(srv), chatRequest()); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 
@@ -137,7 +139,7 @@ func TestToolChoiceNoneDeclaresNoTools(t *testing.T) {
 	req := chatRequest()
 	req.ToolChoice = &gateway.ToolChoice{Mode: gateway.ToolChoiceNone}
 
-	if _, err := NewOllama(nil, "").Complete(context.Background(), modelProvider(srv), req); err != nil {
+	if _, err := NewOllama(nil, shared.StaticKey("")).Complete(context.Background(), modelProvider(srv), req); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 
@@ -240,7 +242,7 @@ func TestPerTryDeadlineIsATimeoutFault(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
-	_, err := NewOllama(nil, "").Complete(ctx, modelProvider(srv), chatRequest())
+	_, err := NewOllama(nil, shared.StaticKey("")).Complete(ctx, modelProvider(srv), chatRequest())
 
 	wantFault(t, err, gateway.FaultTimeout)
 }

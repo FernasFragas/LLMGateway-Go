@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
+
+	"github.com/FernasFragas/LLMGateway-Go/internal/shared"
 )
 
 const servedOpenAI = `{
@@ -53,6 +55,32 @@ type sentRequest struct {
 		} `json:"function"`
 	} `json:"tools"`
 	ToolChoice json.RawMessage `json:"tool_choice"`
+}
+
+func TestRotatedKeyReachesTheVeryNextRequest(t *testing.T) {
+	// The credential is resolved per request, never captured at construction:
+	// keys rotate under a running pod, and an upstream 401 forces a refresh
+	// mid-life (ADR-001). An adapter holding a copy from wiring time would
+	// send the dead key until the process restarted.
+	srv, rec := serving(t, http.StatusOK, servedOpenAI)
+	current := "sk-first"
+	adapter := NewOpenAI(nil, func() string { return current })
+
+	if _, err := adapter.Complete(context.Background(), modelProvider(srv), chatRequest()); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if rec.auth != "Bearer sk-first" {
+		t.Fatalf("Authorization = %q, want the key in force at the time", rec.auth)
+	}
+
+	current = "sk-rotated"
+
+	if _, err := adapter.Complete(context.Background(), modelProvider(srv), chatRequest()); err != nil {
+		t.Fatalf("Complete after rotation: %v", err)
+	}
+	if rec.auth != "Bearer sk-rotated" {
+		t.Errorf("Authorization = %q, want the rotated key — a key read once at construction never rotates", rec.auth)
+	}
 }
 
 func TestDomainRequestSpeaksOpenAI(t *testing.T) {
@@ -125,7 +153,7 @@ func TestToolChoiceNoneSendsTheWiresOwnNoneValue(t *testing.T) {
 	req := chatRequest()
 	req.ToolChoice = &gateway.ToolChoice{Mode: gateway.ToolChoiceNone}
 
-	if _, err := NewOpenAI(nil, "sk-test-key").Complete(context.Background(), modelProvider(srv), req); err != nil {
+	if _, err := NewOpenAI(nil, shared.StaticKey("sk-test-key")).Complete(context.Background(), modelProvider(srv), req); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 
@@ -150,7 +178,7 @@ func TestToolChoiceFunctionForcesTheNamedTool(t *testing.T) {
 	req := chatRequest()
 	req.ToolChoice = &gateway.ToolChoice{Mode: gateway.ToolChoiceFunction, Function: "get_weather"}
 
-	if _, err := NewOpenAI(nil, "sk-test-key").Complete(context.Background(), modelProvider(srv), req); err != nil {
+	if _, err := NewOpenAI(nil, shared.StaticKey("sk-test-key")).Complete(context.Background(), modelProvider(srv), req); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 
@@ -264,9 +292,10 @@ func TestRefusalsAreStatusFaults(t *testing.T) {
 		status int
 		kind   gateway.FaultKind
 	}{
-		"invalid api key is a server fault": {http.StatusUnauthorized, gateway.FaultServerError},
-		"5xx is a server fault":             {http.StatusInternalServerError, gateway.FaultServerError},
-		"429 keeps its own kind":            {http.StatusTooManyRequests, gateway.FaultThrottled},
+		"a refused gateway key is its own fault, so a refresh can be scheduled": {http.StatusUnauthorized, gateway.FaultRejected},
+		"a forbidden gateway key is refused the same way":                       {http.StatusForbidden, gateway.FaultRejected},
+		"5xx is a server fault":  {http.StatusInternalServerError, gateway.FaultServerError},
+		"429 keeps its own kind": {http.StatusTooManyRequests, gateway.FaultThrottled},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv, _ := serving(t, tc.status, `{"error":{"message":"invalid_api_key","type":"invalid_request_error"}}`)
@@ -289,7 +318,7 @@ func TestPerTryDeadlineIsATimeoutFault(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
-	_, err := NewOpenAI(nil, "sk-test-key").Complete(ctx, modelProvider(srv), chatRequest())
+	_, err := NewOpenAI(nil, shared.StaticKey("sk-test-key")).Complete(ctx, modelProvider(srv), chatRequest())
 
 	wantFault(t, err, gateway.FaultTimeout)
 }

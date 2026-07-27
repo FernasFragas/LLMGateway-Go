@@ -29,18 +29,22 @@ const anthropicVersion = "2023-06-01"
 // as a user message holding a tool_result block.
 type Anthropic struct {
 	client *http.Client
-	apiKey string
+	key    shared.Key
 }
 
 // NewAnthropic wraps client; nil means http.DefaultClient — deadlines come
-// from the per-try context, not the client. apiKey is sent as x-api-key on
-// every request.
-func NewAnthropic(client *http.Client, apiKey string) *Anthropic {
+// from the per-try context, not the client. key is resolved on every request
+// and sent as x-api-key, so a rotation reaches the wire within one request
+// instead of waiting for a restart (ADR-001); nil means none.
+func NewAnthropic(client *http.Client, key shared.Key) *Anthropic {
 	if client == nil {
 		client = http.DefaultClient
 	}
+	if key == nil {
+		key = shared.NoKey
+	}
 
-	return &Anthropic{client: client, apiKey: apiKey}
+	return &Anthropic{client: client, key: key}
 }
 
 func (a *Anthropic) Complete(ctx context.Context, mp gateway.ModelProvider, req gateway.ChatRequest) (gateway.Completion, error) {
@@ -54,7 +58,7 @@ func (a *Anthropic) Complete(ctx context.Context, mp gateway.ModelProvider, req 
 		return gateway.Completion{}, shared.BadResponseFault("anthropic", fmt.Errorf("build request: %w", err), nil)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", a.apiKey)
+	httpReq.Header.Set("x-api-key", a.key())
 	httpReq.Header.Set("anthropic-version", anthropicVersion)
 
 	resp, err := a.client.Do(httpReq)

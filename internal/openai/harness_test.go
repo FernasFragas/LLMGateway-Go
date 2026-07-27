@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
+
+	"github.com/FernasFragas/LLMGateway-Go/internal/shared"
 )
 
 // chatRequest exercises every translatable field: sampling knobs, stop
@@ -90,5 +92,5 @@ func wantFault(t *testing.T, err error, kind gateway.FaultKind) *gateway.Provide
 
 func complete(t *testing.T, srv *httptest.Server) (gateway.Completion, error) {
 	t.Helper()
-	return NewOpenAI(nil, "sk-test-key").Complete(context.Background(), modelProvider(srv), chatRequest())
+	return NewOpenAI(nil, shared.StaticKey("sk-test-key")).Complete(context.Background(), modelProvider(srv), chatRequest())
 }

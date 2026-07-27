@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
+
+	"github.com/FernasFragas/LLMGateway-Go/internal/shared"
 )
 
 // chatRequest exercises every translatable field: sampling knobs, stop
@@ -92,5 +94,5 @@ func wantFault(t *testing.T, err error, kind gateway.FaultKind) *gateway.Provide
 // no Authorization header. The cloud (keyed) path has its own test.
 func complete(t *testing.T, srv *httptest.Server) (gateway.Completion, error) {
 	t.Helper()
-	return NewOllama(nil, "").Complete(context.Background(), modelProvider(srv), chatRequest())
+	return NewOllama(nil, shared.StaticKey("")).Complete(context.Background(), modelProvider(srv), chatRequest())
 }
