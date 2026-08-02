@@ -1,6 +1,6 @@
 // Command gateway runs the LLM gateway server. run() composes the process
 // from the pieces the rest of the tree already ships — config.Load, the
-// identity chain (newAppDirectory + refreshJWKS), and newServer for the edge.
+// identity chain (newAppDirectory + auth.KeepFresh), and newServer for the edge.
 // newProviderClient builds the credential cache, the three dialect adapters,
 // and the router that picks one per route; newLimiters builds both metered
 // currencies. Every port the core declares now has a real adapter behind it,
@@ -24,15 +24,16 @@ import (
 	"github.com/FernasFragas/LLMGateway-Go/internal/config"
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
 	"github.com/FernasFragas/LLMGateway-Go/internal/health"
+	"github.com/FernasFragas/LLMGateway-Go/internal/keys-provider"
 	"github.com/FernasFragas/LLMGateway-Go/internal/logs/api"
 	authlogs "github.com/FernasFragas/LLMGateway-Go/internal/logs/auth"
 	gwlogs "github.com/FernasFragas/LLMGateway-Go/internal/logs/gateway"
+	keyslogs "github.com/FernasFragas/LLMGateway-Go/internal/logs/keys-provider"
 	"github.com/FernasFragas/LLMGateway-Go/internal/metrics/api"
 	"github.com/FernasFragas/LLMGateway-Go/internal/ollama"
 	"github.com/FernasFragas/LLMGateway-Go/internal/openai"
 	"github.com/FernasFragas/LLMGateway-Go/internal/providers"
 	"github.com/FernasFragas/LLMGateway-Go/internal/redis"
-	"github.com/FernasFragas/LLMGateway-Go/internal/secrets"
 	"github.com/FernasFragas/LLMGateway-Go/internal/slots"
 )
 
@@ -69,7 +70,7 @@ func newServer(cfg api.Config, core api.ChatService, checker *health.Checker,
 // cache feeding the verifier, readiness registered fail-closed on the
 // checker (a cold pod takes no traffic instead of refusing every token),
 // and the unknown-caller log wrapped around the directory. The returned
-// JWKSCache is handed to refreshJWKS — the request path itself never touches
+// JWKSCache is handed to auth.KeepFresh — the request path itself never touches
 // the network.
 func newAppDirectory(cfg config.Config, checker *health.Checker, log *slog.Logger) (gateway.AppDirectory, *auth.JWKSCache, error) {
 	// In a pod this client trusts the cluster CA and carries the gateway's own
@@ -94,27 +95,6 @@ func newAppDirectory(cfg config.Config, checker *health.Checker, log *slog.Logge
 	checker.AddReadiness("jwks", keys.Ready)
 
 	return gwlogs.NewAppDirectory(dir, log), keys, nil
-}
-
-// refreshJWKS keeps the cache warm until ctx ends: once immediately, so
-// readiness turns green as soon as the issuer answers, then every interval —
-// each attempt through the logs decorator, because a failed refresh serves
-// stale keys silently and the log line is the only signal.
-func refreshJWKS(ctx context.Context, keys *auth.JWKSCache, interval time.Duration, log *slog.Logger) {
-	refresh := authlogs.NewJWKSRefresher(keys, log)
-	_ = refresh.Refresh(ctx)
-
-	tick := time.NewTicker(interval)
-	defer tick.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-tick.C:
-			_ = refresh.Refresh(ctx)
-		}
-	}
 }
 
 func main() {
@@ -158,9 +138,10 @@ func run() error {
 		log.Error("failed to build app directory", "error", err)
 		return err
 	}
-	// Keep the key cache warm until ctx ends; the first refresh turns readiness
-	// green as soon as the issuer answers.
-	go refreshJWKS(ctx, keys, cfg.JWKS.RefreshInterval, log)
+	// Keep the key cache warm until ctx ends. The loop is auth's logic; main
+	// only composes the logging decorator around the cache and hands it over.
+	jwksRefresh := authlogs.NewJWKSRefresher(keys, log)
+	go auth.KeepFresh(ctx, jwksRefresh, cfg.JWKS.RefreshInterval)
 
 	provider, err := newProviderClient(ctx, cfg, checker, log)
 	if err != nil {
@@ -262,16 +243,21 @@ func newProviderClient(ctx context.Context, cfg config.Config, checker *health.C
 		return nil, err
 	}
 
-	sources := make(map[string]secrets.Source, len(cfg.SecretSource.Providers))
+	sources := make(map[string]keys_provider.Source, len(cfg.SecretSource.Providers))
 	for provider, src := range cfg.SecretSource.Providers {
-		sources[provider] = secrets.Source{Path: src.Path, RefreshInterval: src.RefreshInterval}
+		sources[provider] = keys_provider.Source{Path: src.Path, RefreshInterval: src.RefreshInterval}
 	}
 
-	keys, err := secrets.New(fetcher, sources)
+	keys, err := keys_provider.New(fetcher, sources)
 	if err != nil {
 		return nil, err
 	}
 	checker.AddReadiness("provider-keys", keys.Ready)
+
+	// Every background refresh — periodic and post-rejection — runs through
+	// the logging decorator; the cache's loops own the cadence, main only
+	// injects what they call.
+	keys.RefreshVia(keyslogs.NewRefresher(keys, log))
 
 	// Load once before serving, then per provider on its own timer. A failed
 	// first load is not fatal: readiness holds the pod out of rotation, and
@@ -281,7 +267,7 @@ func newProviderClient(ctx context.Context, cfg config.Config, checker *health.C
 		log.Warn("initial provider key load incomplete; readiness gates until a source answers", "error", err)
 	}
 	for _, provider := range keys.Providers() {
-		go refreshProviderKey(ctx, keys, provider, log)
+		go keys.KeepFresh(ctx, provider)
 	}
 
 	// Each adapter is handed an accessor, never a string: a key rotates under
@@ -302,46 +288,20 @@ func newProviderClient(ctx context.Context, cfg config.Config, checker *health.C
 
 // newFetcher picks how credentials are read. Both kinds ship; an unknown kind
 // never reaches here, the config loader having refused the file already.
-func newFetcher(src config.SecretSource) (secrets.Fetcher, error) {
+func newFetcher(src config.SecretSource) (keys_provider.Fetcher, error) {
 	switch src.Kind {
 	case "vault":
-		return secrets.NewVault(nil, secrets.VaultConfig{
+		return keys_provider.NewVault(nil, keys_provider.VaultConfig{
 			Address:  src.Vault.Address,
 			Role:     src.Vault.Role,
 			AuthPath: src.Vault.AuthPath,
 		})
 	case "file":
-		return secrets.NewFile(), nil
+		return keys_provider.NewFile(), nil
 	default:
 		// No kind and no providers: every route is self-hosted and there is
-		// nothing to read. secrets.New rejects the contradictory case.
+		// nothing to read. keys-provider.New rejects the contradictory case.
 		return nil, nil
-	}
-}
-
-// refreshProviderKey keeps one provider's credential current until ctx ends,
-// on that provider's own cadence — the reason the sources fan out at all. A
-// failed refresh keeps the last known good key and logs; it never empties the
-// cache and never stops the loop.
-func refreshProviderKey(ctx context.Context, keys *secrets.Cache, provider string, log *slog.Logger) {
-	interval := keys.Interval(provider)
-	if interval <= 0 {
-		return
-	}
-
-	tick := time.NewTicker(interval)
-	defer tick.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-tick.C:
-			if err := keys.Refresh(ctx, provider); err != nil && ctx.Err() == nil {
-				log.Warn("provider key refresh failed; serving the cached credential",
-					"provider", provider, "error", err.Error())
-			}
-		}
 	}
 }
 

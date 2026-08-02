@@ -1,4 +1,4 @@
-package secrets
+package keys_provider
 
 import (
 	"context"

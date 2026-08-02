@@ -1,4 +1,4 @@
-package secrets
+package keys_provider
 
 // Test harness: a fetcher the test drives directly, and a temp dir standing
 // in for the mount. Each test states the rule it holds the cache to at its
@@ -117,4 +117,40 @@ func rewrite(t *testing.T, path, content string) {
 // decodeJSON reads a request body into v.
 func decodeJSON(r *http.Request, v any) error {
 	return json.NewDecoder(r.Body).Decode(v)
+}
+
+// observing wraps a Refresher the way a logs decorator would, remembering what
+// passed through so a test can prove the seam carries both the call and its
+// error.
+type observing struct {
+	next Refresher
+
+	mu   sync.Mutex
+	n    int
+	last error
+}
+
+func (o *observing) Refresh(ctx context.Context, provider string) error {
+	err := o.next.Refresh(ctx, provider)
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.n++
+	o.last = err
+
+	return err
+}
+
+func (o *observing) calls() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	return o.n
+}
+
+func (o *observing) lastErr() error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	return o.last
 }

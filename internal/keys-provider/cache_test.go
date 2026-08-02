@@ -1,7 +1,8 @@
-package secrets
+package keys_provider
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -189,6 +190,83 @@ func TestAgeIsUnsetUntilTheFirstLoad(t *testing.T) {
 	if _, loaded := c.Age("openai"); !loaded {
 		t.Error("age must report loaded once a credential is in force")
 	}
+}
+
+func TestTriggeredRefreshRunsThroughTheInjectedRefresher(t *testing.T) {
+	// TriggerRefresh runs its refresh on a goroutine this cache owns. RefreshVia
+	// is the seam that lets main hand that goroutine a decorated refresher —
+	// without it, the refresh that follows an upstream 401 (decision #8) is the
+	// one failure no decorator can ever observe.
+	src := &serving{key: "sk-live"}
+	c := warm(t, src)
+	seen := &observing{next: c}
+	c.RefreshVia(seen)
+
+	if !c.TriggerRefresh("openai") {
+		t.Fatal("the first rejection must schedule a refresh")
+	}
+	eventually(t, func() bool { return seen.calls() > 0 },
+		"the out-of-band refresh must pass through the injected refresher — it is the decorator's only way in")
+}
+
+func TestInjectedRefresherObservesTheTriggeredFailure(t *testing.T) {
+	// The failure the seam exists for: a rejection scheduled a refresh, the
+	// source is down, and the decorator must see the source's own error.
+	src := &serving{key: "sk-live"}
+	c := warm(t, src)
+	seen := &observing{next: c}
+	c.RefreshVia(seen)
+	src.set("", errSourceDown)
+
+	c.TriggerRefresh("openai")
+
+	eventually(t, func() bool { return seen.calls() > 0 }, "the triggered refresh never ran")
+	if err := seen.lastErr(); !errors.Is(err, errSourceDown) {
+		t.Errorf("observed error = %v, want the source's own — the seam must not launder it", err)
+	}
+}
+
+func TestKeepFreshDrivesRefreshesThroughTheInjectedSeam(t *testing.T) {
+	// The periodic loop is this cache's logic, not main's — and it must run
+	// through the same seam TriggerRefresh does, or the decorator would see
+	// only half the refreshes.
+	src := &serving{key: "sk-live"}
+	c, err := New(src, map[string]Source{
+		"openai": {Path: "secret/data/llm/openai", RefreshInterval: time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	seen := &observing{next: c}
+	c.RefreshVia(seen)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go c.KeepFresh(ctx, "openai")
+
+	eventually(t, func() bool { return seen.calls() >= 3 },
+		"the loop must keep driving refreshes on the provider's own cadence, through the seam")
+}
+
+func TestKeepFreshWithNoCadenceReturnsImmediately(t *testing.T) {
+	// A zero interval means no background refresh is wanted; the loop has
+	// nothing to do and must say so by returning, not by spinning or blocking.
+	c := warm(t, &serving{key: "sk-live"})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.KeepFresh(context.Background(), "unconfigured")
+	}()
+
+	eventually(t, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	}, "a provider with no cadence must not hold a goroutine forever")
 }
 
 // failing serves the keys it knows and errors for every other path.

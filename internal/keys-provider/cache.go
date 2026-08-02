@@ -1,4 +1,4 @@
-package secrets
+package keys_provider
 
 import (
 	"context"
@@ -29,6 +29,15 @@ type Fetcher interface {
 	Fetch(ctx context.Context, path string) (string, error)
 }
 
+// Refresher is one provider's credential refresh as this cache's own
+// background paths drive it — declared here because this cache is the
+// caller: the periodic loop and the post-rejection trigger both go through
+// it, so whatever main composes around the cache (the logs decorator)
+// observes every refresh, scheduled or triggered.
+type Refresher interface {
+	Refresh(ctx context.Context, provider string) error
+}
+
 // Source is one provider's credential location and its own refresh cadence.
 type Source struct {
 	Path            string
@@ -53,6 +62,10 @@ type Cache struct {
 	fetch   Fetcher
 	entries map[string]*entry
 	now     func() time.Time // swapped in tests
+
+	// refresh is what the background paths call — the cache itself until
+	// RefreshVia injects the decorated version.
+	refresh Refresher
 }
 
 // New builds the cache over sources, keyed by provider name — the one
@@ -61,18 +74,30 @@ type Cache struct {
 // not an error.
 func New(fetch Fetcher, sources map[string]Source) (*Cache, error) {
 	if fetch == nil && len(sources) > 0 {
-		return nil, errors.New("secrets: a Fetcher is required when any provider has a source")
+		return nil, errors.New("keys-provider: a Fetcher is required when any provider has a source")
 	}
 
 	entries := make(map[string]*entry, len(sources))
 	for provider, src := range sources {
 		if src.Path == "" {
-			return nil, fmt.Errorf("secrets: provider %q has no path", provider)
+			return nil, fmt.Errorf("keys-provider: provider %q has no path", provider)
 		}
 		entries[provider] = &entry{source: src}
 	}
 
-	return &Cache{fetch: fetch, entries: entries, now: time.Now}, nil
+	c := &Cache{fetch: fetch, entries: entries, now: time.Now}
+	c.refresh = c
+
+	return c, nil
+}
+
+// RefreshVia routes every background refresh — periodic and triggered —
+// through r, which is how main injects the logging decorator around this
+// cache. Wire it before serving; it is not safe to swap mid-flight.
+func (c *Cache) RefreshVia(r Refresher) {
+	if r != nil {
+		c.refresh = r
+	}
 }
 
 // KeyFor returns the credential in force for provider, or "" when it has none
@@ -145,7 +170,7 @@ func (c *Cache) Age(provider string) (time.Duration, bool) {
 func (c *Cache) Refresh(ctx context.Context, provider string) error {
 	e, ok := c.entries[provider]
 	if !ok {
-		return fmt.Errorf("secrets: provider %q has no configured source", provider)
+		return fmt.Errorf("keys-provider: provider %q has no configured source", provider)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
@@ -153,13 +178,13 @@ func (c *Cache) Refresh(ctx context.Context, provider string) error {
 
 	key, err := c.fetch.Fetch(ctx, e.source.Path)
 	if err != nil {
-		return fmt.Errorf("secrets: refresh %s: %w", provider, err)
+		return fmt.Errorf("keys-provider: refresh %s: %w", provider, err)
 	}
 	if key == "" {
 		// An empty read is a source that exists but holds nothing — almost
 		// always a half-written secret. Overwriting a working credential with
 		// it would turn a fixable mistake into an outage.
-		return fmt.Errorf("secrets: refresh %s: source holds no credential", provider)
+		return fmt.Errorf("keys-provider: refresh %s: source holds no credential", provider)
 	}
 
 	e.mu.Lock()
@@ -212,11 +237,37 @@ func (c *Cache) TriggerRefresh(provider string) bool {
 		}()
 		// Deliberately not the request's context: that request is already
 		// finished, and its cancellation must not abort a refresh every later
-		// request depends on.
-		_ = c.Refresh(context.Background(), provider)
+		// request depends on. Through the seam, so the decorator sees it —
+		// this is the failure the whole injection exists for.
+		_ = c.refresh.Refresh(context.Background(), provider)
 	}()
 
 	return true
+}
+
+// KeepFresh keeps one provider's credential current until ctx ends, on that
+// provider's own cadence — the reason the sources fan out at all. A provider
+// with no cadence has nothing to keep fresh, and the loop says so by
+// returning. Errors are dropped on purpose: a failed refresh keeps the last
+// known good key (fail static), and the injected refresher's decorator gives
+// the failure its line.
+func (c *Cache) KeepFresh(ctx context.Context, provider string) {
+	interval := c.Interval(provider)
+	if interval <= 0 {
+		return
+	}
+
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			_ = c.refresh.Refresh(ctx, provider)
+		}
+	}
 }
 
 // Ready is health.Check-shaped. It reports ready once anything is servable:

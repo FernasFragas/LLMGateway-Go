@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
+	"github.com/FernasFragas/LLMGateway-Go/internal/keys-provider"
 	"github.com/FernasFragas/LLMGateway-Go/internal/openai"
-	"github.com/FernasFragas/LLMGateway-Go/internal/secrets"
 )
 
 // The three pieces main composes — key cache, dialect adapter, router — held
@@ -129,13 +129,13 @@ func secretFile(t *testing.T, content string) string {
 // wiredWithCache composes exactly what main composes: a file-backed cache, the
 // real OpenAI adapter holding an accessor into it, and the router reporting
 // rejections back to the cache.
-func wiredWithCache(t *testing.T, secretPath string, _ *httptest.Server) (*Router, *secrets.Cache) {
+func wiredWithCache(t *testing.T, secretPath string, _ *httptest.Server) (*Router, *keys_provider.Cache) {
 	t.Helper()
-	keys, err := secrets.New(secrets.NewFile(), map[string]secrets.Source{
+	keys, err := keys_provider.New(keys_provider.NewFile(), map[string]keys_provider.Source{
 		"openai": {Path: secretPath, RefreshInterval: time.Hour},
 	})
 	if err != nil {
-		t.Fatalf("secrets.New: %v", err)
+		t.Fatalf("keys-provider.New: %v", err)
 	}
 	if err := keys.RefreshAll(context.Background()); err != nil {
 		t.Fatalf("first load: %v", err)

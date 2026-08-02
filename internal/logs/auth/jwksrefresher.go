@@ -5,15 +5,9 @@ import (
 	"log/slog"
 
 	"github.com/FernasFragas/LLMGateway-Go/internal/logs"
+
+	"github.com/FernasFragas/LLMGateway-Go/internal/auth"
 )
-
-// refresher is the background key refresh as main drives it — structurally
-// auth.JWKSCache's Refresh.
-type refresher interface {
-	Refresh(ctx context.Context) error
-}
-
-var _ refresher = (*JWKSRefresher)(nil)
 
 // JWKSRefresher logs a failed refresh of the cluster's token-signing keys.
 // The cache keeps verifying against its stale keys (fail static), so nothing
@@ -22,12 +16,12 @@ var _ refresher = (*JWKSRefresher)(nil)
 // back off on. The provider key cache gets its own decorator; a reader must
 // never have to guess which cache a "key refresh failed" line came from.
 type JWKSRefresher struct {
-	next refresher
+	next auth.Refresher
 	log  *slog.Logger
 }
 
 // NewJWKSRefresher wraps next; a nil log means slog.Default().
-func NewJWKSRefresher(next refresher, log *slog.Logger) *JWKSRefresher {
+func NewJWKSRefresher(next auth.Refresher, log *slog.Logger) *JWKSRefresher {
 	return &JWKSRefresher{next: next, log: logs.OrDefault(log)}
 }
 

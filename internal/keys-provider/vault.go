@@ -1,4 +1,4 @@
-package secrets
+package keys_provider
 
 import (
 	"bytes"
@@ -57,11 +57,11 @@ type VaultConfig struct {
 func NewVault(client *http.Client, cfg VaultConfig) (*Vault, error) {
 	switch {
 	case cfg.Address == "":
-		return nil, errors.New("secrets: vault address is required")
+		return nil, errors.New("keys-provider: vault address is required")
 	case cfg.Role == "":
-		return nil, errors.New("secrets: vault role is required")
+		return nil, errors.New("keys-provider: vault role is required")
 	case cfg.AuthPath == "":
-		return nil, errors.New("secrets: vault auth path is required")
+		return nil, errors.New("keys-provider: vault auth path is required")
 	}
 	if client == nil {
 		client = http.DefaultClient
