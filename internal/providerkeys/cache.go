@@ -1,4 +1,4 @@
-package keys_provider
+package providerkeys
 
 import (
 	"context"
@@ -61,7 +61,6 @@ type entry struct {
 type Cache struct {
 	fetch   Fetcher
 	entries map[string]*entry
-	now     func() time.Time // swapped in tests
 
 	// refresh is what the background paths call — the cache itself until
 	// RefreshVia injects the decorated version.
@@ -74,18 +73,18 @@ type Cache struct {
 // not an error.
 func New(fetch Fetcher, sources map[string]Source) (*Cache, error) {
 	if fetch == nil && len(sources) > 0 {
-		return nil, errors.New("keys-provider: a Fetcher is required when any provider has a source")
+		return nil, errors.New("providerkeys: a Fetcher is required when any provider has a source")
 	}
 
 	entries := make(map[string]*entry, len(sources))
 	for provider, src := range sources {
 		if src.Path == "" {
-			return nil, fmt.Errorf("keys-provider: provider %q has no path", provider)
+			return nil, fmt.Errorf("providerkeys: provider %q has no path", provider)
 		}
 		entries[provider] = &entry{source: src}
 	}
 
-	c := &Cache{fetch: fetch, entries: entries, now: time.Now}
+	c := &Cache{fetch: fetch, entries: entries}
 	c.refresh = c
 
 	return c, nil
@@ -161,7 +160,7 @@ func (c *Cache) Age(provider string) (time.Duration, bool) {
 		return 0, false
 	}
 
-	return c.now().Sub(e.loadedAt), true
+	return time.Since(e.loadedAt), true
 }
 
 // Refresh loads one provider's credential, replacing the cached value only on
@@ -170,7 +169,7 @@ func (c *Cache) Age(provider string) (time.Duration, bool) {
 func (c *Cache) Refresh(ctx context.Context, provider string) error {
 	e, ok := c.entries[provider]
 	if !ok {
-		return fmt.Errorf("keys-provider: provider %q has no configured source", provider)
+		return fmt.Errorf("providerkeys: provider %q has no configured source", provider)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
@@ -178,17 +177,17 @@ func (c *Cache) Refresh(ctx context.Context, provider string) error {
 
 	key, err := c.fetch.Fetch(ctx, e.source.Path)
 	if err != nil {
-		return fmt.Errorf("keys-provider: refresh %s: %w", provider, err)
+		return fmt.Errorf("providerkeys: refresh %s: %w", provider, err)
 	}
 	if key == "" {
 		// An empty read is a source that exists but holds nothing — almost
 		// always a half-written secret. Overwriting a working credential with
 		// it would turn a fixable mistake into an outage.
-		return fmt.Errorf("keys-provider: refresh %s: source holds no credential", provider)
+		return fmt.Errorf("providerkeys: refresh %s: source holds no credential", provider)
 	}
 
 	e.mu.Lock()
-	e.key, e.loadedAt = key, c.now()
+	e.key, e.loadedAt = key, time.Now()
 	e.mu.Unlock()
 
 	return nil
@@ -224,10 +223,10 @@ func (c *Cache) TriggerRefresh(provider string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if e.refreshing || c.now().Sub(e.lastTrigger) < triggerCooldown {
+	if e.refreshing || time.Since(e.lastTrigger) < triggerCooldown {
 		return false
 	}
-	e.refreshing, e.lastTrigger = true, c.now()
+	e.refreshing, e.lastTrigger = true, time.Now()
 
 	go func() {
 		defer func() {
@@ -292,5 +291,5 @@ func (c *Cache) Ready(context.Context) error {
 		}
 	}
 
-	return errors.New("provider-keys: no configured source has loaded yet")
+	return errors.New("providerkeys: no configured source has loaded yet")
 }

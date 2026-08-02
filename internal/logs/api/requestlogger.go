@@ -9,8 +9,6 @@ import (
 	"github.com/FernasFragas/LLMGateway-Go/internal/logs"
 )
 
-var _ http.Handler = (*RequestLogger)(nil)
-
 // RequestLogger emits one line per request: method, path, status, duration,
 // correlation ID. Never the body, never the Authorization header — the
 // gateway is content-blind and its request log must be too.

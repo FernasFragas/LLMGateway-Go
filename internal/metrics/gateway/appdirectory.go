@@ -7,8 +7,6 @@ import (
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
 )
 
-var _ gateway.AppDirectory = (*AppDirectory)(nil)
-
 // AppDirectory counts resolved and unrecognized key lookups — the volume
 // behind the refusal logs.NewAppDirectory writes.
 type AppDirectory struct {

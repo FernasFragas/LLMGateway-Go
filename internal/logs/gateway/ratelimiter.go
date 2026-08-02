@@ -9,8 +9,6 @@ import (
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
 )
 
-var _ gateway.RateLimiter = (*RateLimiter)(nil)
-
 // RateLimiter logs the limiter's own failure — the error the core swallows
 // when it fails open. The unmetered-request count lives in UsageRecorder;
 // the cause lives here.

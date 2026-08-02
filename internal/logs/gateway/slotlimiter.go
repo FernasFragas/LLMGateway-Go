@@ -8,8 +8,6 @@ import (
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
 )
 
-var _ gateway.SlotLimiter = (*SlotLimiter)(nil)
-
 // SlotLimiter logs refusals with the ceiling that refused — the rejection
 // counter carries only the outcome code; the number is visible here.
 type SlotLimiter struct {

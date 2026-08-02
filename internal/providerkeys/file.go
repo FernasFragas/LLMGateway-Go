@@ -1,4 +1,4 @@
-package keys_provider
+package providerkeys
 
 import (
 	"context"

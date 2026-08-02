@@ -6,8 +6,6 @@ import (
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
 )
 
-var _ gateway.SlotLimiter = (*SlotLimiter)(nil)
-
 // SlotLimiter counts granted and refused in-flight slots — the third
 // currency's own volume, distinct from the rate limiter's.
 type SlotLimiter struct {

@@ -9,8 +9,6 @@ import (
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
 )
 
-var _ gateway.AppDirectory = (*AppDirectory)(nil)
-
 // AppDirectory logs refusals of keys nobody owns — the only failure the core
 // cannot attribute to an app. The key itself is a secret and is never logged;
 // a successful resolution is logged not at all (the completion log already

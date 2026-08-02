@@ -8,8 +8,6 @@ import (
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
 )
 
-var _ gateway.UsageRecorder = (*UsageRecorder)(nil)
-
 // UsageRecorder counts the facts the core reports and forwards every call to
 // next unchanged — typically the logging recorder, so one call both meters
 // and narrates. Token totals are the only sums; app, model provider, and

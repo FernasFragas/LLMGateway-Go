@@ -1,4 +1,4 @@
-package keys_provider
+package providerkeys
 
 // Test harness: a fetcher the test drives directly, and a temp dir standing
 // in for the mount. Each test states the rule it holds the cache to at its

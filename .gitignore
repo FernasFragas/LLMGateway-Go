@@ -1,8 +1,8 @@
 # Operator-local configuration — config.example.yaml is the committed schema.
 /config/config.yaml
 # The operator's local credential files, at the repo root only. The leading
-# slash matters: unanchored, `keys-provider/` matches a directory of that name at
-# any depth and would silently swallow internal/keys-provider — the package, not a
+# slash matters: unanchored, `providerkeys/` matches a directory of that name at
+# any depth and would silently swallow internal/providerkeys — the package, not a
 # credential — leaving it out of every commit.
 /secrets/
 

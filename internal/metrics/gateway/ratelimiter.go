@@ -7,8 +7,6 @@ import (
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
 )
 
-var _ gateway.RateLimiter = (*RateLimiter)(nil)
-
 // RateLimiter counts allowed and denied decisions, and separately the
 // limiter's own outages — a fail-open is neither an allow nor a deny, it is
 // the quota going unenforced.

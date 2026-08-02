@@ -12,8 +12,6 @@ import (
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
 )
 
-var _ gateway.ProviderClient = (*ProviderClient)(nil)
-
 // ProviderClient logs each attempt's outcome by model provider, never by
 // content.
 // A fault's Cause has exactly one outlet — this log line; the error itself

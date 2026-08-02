@@ -9,8 +9,6 @@ import (
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
 )
 
-var _ gateway.ProviderClient = (*ProviderClient)(nil)
-
 // ProviderClient counts provider attempts and their failures by fault kind.
 // Kind is the only label — fixed cardinality regardless of how many
 // providers or models the router dispatches to.

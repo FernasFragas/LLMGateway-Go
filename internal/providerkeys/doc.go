@@ -1,4 +1,4 @@
-// Package keys_provider is the provider key cache: the outbound half of decision
+// Package providerkeys is the provider key cache: the outbound half of decision
 // #1's two fail-static caches. It holds the credentials the gateway spends on
 // its own calls to OpenAI and Anthropic, and it authenticates nobody — inbound
 // identity is internal/auth's JWKS cache, fed by the kube-apiserver. The two
@@ -30,4 +30,4 @@
 //
 // Keys are values, never logged. The logs decorator reports that a refresh
 // failed, never what the cache holds.
-package keys_provider
+package providerkeys

@@ -9,8 +9,6 @@ import (
 	"github.com/FernasFragas/LLMGateway-Go/internal/logs"
 )
 
-var _ http.Handler = (*PanicLogger)(nil)
-
 // PanicLogger gives a panic its log line — the value and the stack — and
 // re-panics. Observing is this decorator's whole job: answering the caller
 // belongs to the recover middleware outside it, the only layer that

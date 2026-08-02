@@ -79,7 +79,7 @@ routes:
   - {model: gpt-4.1, provider: openai, endpoint: "https://api.openai.com/v1"}
 secret_source:
   kind: file
-  providers: {opanai: {path: ./keys-provider/openai}}
+  providers: {opanai: {path: ./providerkeys/openai}}
 `, "no route names that provider")
 }
 
@@ -110,7 +110,7 @@ func TestProvidersWithoutAKindAreRefused(t *testing.T) {
 routes:
   - {model: gpt-4.1, provider: openai, endpoint: "https://api.openai.com/v1"}
 secret_source:
-  providers: {openai: {path: ./keys-provider/openai}}
+  providers: {openai: {path: ./providerkeys/openai}}
 `, "kind is required")
 }
 
@@ -135,7 +135,7 @@ routes:
 secret_source:
   kind: file
   refresh_interval: 90s
-  providers: {openai: {path: ./keys-provider/openai}}
+  providers: {openai: {path: ./providerkeys/openai}}
 `))
 	if err != nil {
 		t.Fatalf("Load: %v", err)

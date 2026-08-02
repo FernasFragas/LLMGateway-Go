@@ -10,8 +10,6 @@ import (
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
 )
 
-var _ gateway.UsageRecorder = (*UsageRecorder)(nil)
-
 // UsageRecorder turns the core's usage facts into structured log lines.
 // slog never blocks and never fails the caller, honoring the port's
 // contract: observability never gates the data path.

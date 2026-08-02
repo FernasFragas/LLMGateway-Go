@@ -6,7 +6,7 @@ import (
 
 	"github.com/FernasFragas/LLMGateway-Go/internal/logs"
 
-	keys_provider "github.com/FernasFragas/LLMGateway-Go/internal/keys-provider"
+	providerkeys "github.com/FernasFragas/LLMGateway-Go/internal/providerkeys"
 )
 
 // Refresher logs a failed refresh of a provider's credential. The cache keeps
@@ -16,12 +16,12 @@ import (
 // key", never just "key": a reader must not have to guess whether a
 // failed-refresh line came from this cache or from internal/auth's JWKS one.
 type Refresher struct {
-	next keys_provider.Refresher
+	next providerkeys.Refresher
 	log  *slog.Logger
 }
 
 // NewRefresher wraps next; a nil log means slog.Default().
-func NewRefresher(next keys_provider.Refresher, log *slog.Logger) *Refresher {
+func NewRefresher(next providerkeys.Refresher, log *slog.Logger) *Refresher {
 	return &Refresher{next: next, log: logs.OrDefault(log)}
 }
 

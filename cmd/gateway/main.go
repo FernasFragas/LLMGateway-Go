@@ -24,14 +24,14 @@ import (
 	"github.com/FernasFragas/LLMGateway-Go/internal/config"
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
 	"github.com/FernasFragas/LLMGateway-Go/internal/health"
-	"github.com/FernasFragas/LLMGateway-Go/internal/keys-provider"
 	"github.com/FernasFragas/LLMGateway-Go/internal/logs/api"
 	authlogs "github.com/FernasFragas/LLMGateway-Go/internal/logs/auth"
 	gwlogs "github.com/FernasFragas/LLMGateway-Go/internal/logs/gateway"
-	keyslogs "github.com/FernasFragas/LLMGateway-Go/internal/logs/keys-provider"
+	keyslogs "github.com/FernasFragas/LLMGateway-Go/internal/logs/providerkeys"
 	"github.com/FernasFragas/LLMGateway-Go/internal/metrics/api"
 	"github.com/FernasFragas/LLMGateway-Go/internal/ollama"
 	"github.com/FernasFragas/LLMGateway-Go/internal/openai"
+	"github.com/FernasFragas/LLMGateway-Go/internal/providerkeys"
 	"github.com/FernasFragas/LLMGateway-Go/internal/providers"
 	"github.com/FernasFragas/LLMGateway-Go/internal/redis"
 	"github.com/FernasFragas/LLMGateway-Go/internal/slots"
@@ -243,12 +243,12 @@ func newProviderClient(ctx context.Context, cfg config.Config, checker *health.C
 		return nil, err
 	}
 
-	sources := make(map[string]keys_provider.Source, len(cfg.SecretSource.Providers))
+	sources := make(map[string]providerkeys.Source, len(cfg.SecretSource.Providers))
 	for provider, src := range cfg.SecretSource.Providers {
-		sources[provider] = keys_provider.Source{Path: src.Path, RefreshInterval: src.RefreshInterval}
+		sources[provider] = providerkeys.Source{Path: src.Path, RefreshInterval: src.RefreshInterval}
 	}
 
-	keys, err := keys_provider.New(fetcher, sources)
+	keys, err := providerkeys.New(fetcher, sources)
 	if err != nil {
 		return nil, err
 	}
@@ -288,19 +288,19 @@ func newProviderClient(ctx context.Context, cfg config.Config, checker *health.C
 
 // newFetcher picks how credentials are read. Both kinds ship; an unknown kind
 // never reaches here, the config loader having refused the file already.
-func newFetcher(src config.SecretSource) (keys_provider.Fetcher, error) {
+func newFetcher(src config.SecretSource) (providerkeys.Fetcher, error) {
 	switch src.Kind {
 	case "vault":
-		return keys_provider.NewVault(nil, keys_provider.VaultConfig{
+		return providerkeys.NewVault(nil, providerkeys.VaultConfig{
 			Address:  src.Vault.Address,
 			Role:     src.Vault.Role,
 			AuthPath: src.Vault.AuthPath,
 		})
 	case "file":
-		return keys_provider.NewFile(), nil
+		return providerkeys.NewFile(), nil
 	default:
 		// No kind and no providers: every route is self-hosted and there is
-		// nothing to read. keys-provider.New rejects the contradictory case.
+		// nothing to read. providerkeys.New rejects the contradictory case.
 		return nil, nil
 	}
 }

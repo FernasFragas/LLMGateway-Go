@@ -8,8 +8,6 @@ import (
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
 )
 
-var _ gateway.AppDirectory = (*Directory)(nil)
-
 // Config binds the verifier to one cluster and names the callers.
 type Config struct {
 	// Issuer is the cluster's ServiceAccount token issuer, matched exactly.
