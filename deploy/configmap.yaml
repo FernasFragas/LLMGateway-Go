@@ -84,6 +84,7 @@ data:
         anthropic:
           path: /etc/gateway/keys/anthropic
 
+    # Metrics, traces, and logs all leave over this one OTLP endpoint
+    # (ADR-002) — there is no scrape port to open or annotate.
     telemetry:
       otlp_endpoint: otel-collector.observability.svc.cluster.local:4317
-      metrics_listen: ":9090"

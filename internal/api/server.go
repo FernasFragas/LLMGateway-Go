@@ -58,9 +58,6 @@ type Config struct {
 type Deps struct {
 	Chat   ChatService
 	Health HealthChecker
-	// Metrics serves GET /metrics; nil until the Prometheus adapter lands
-	// (the route 404s meanwhile).
-	Metrics http.Handler
 	// ErrorLog is handed to http.Server verbatim (main builds it via
 	// slog.NewLogLogger); nil means the stdlib default.
 	ErrorLog *log.Logger
@@ -83,7 +80,6 @@ type Server struct {
 	health HealthChecker
 
 	chat         ChatService
-	metrics      http.Handler
 	requestMW    []Middleware
 	panicMW      []Middleware
 	maxBodyBytes int64
@@ -123,7 +119,6 @@ func New(cfg Config, deps Deps) (*Server, error) {
 		mux:          http.NewServeMux(),
 		health:       deps.Health,
 		chat:         deps.Chat,
-		metrics:      deps.Metrics,
 		requestMW:    deps.RequestMiddleware,
 		panicMW:      deps.PanicMiddleware,
 		maxBodyBytes: cfg.MaxBodyBytes,
@@ -163,10 +158,11 @@ func (s *Server) routes() {
 							s.authenticate(h))))))
 	}
 
-	// Probes and metrics carry no credential (kubelet and Prometheus won't)
-	// and skip the request seam (they would drown the request log) — but
-	// panics are still observed and answered, and every response still
-	// carries a correlation ID.
+	// Probes carry no credential (the kubelet won't send one) and skip the
+	// request seam (they would drown the request log) — but panics are
+	// still observed and answered, and every response still carries a
+	// correlation ID. Metrics are not served here at all: per ADR-002 they
+	// leave via OTLP push, wired directly in main, never through this mux.
 	ops := func(h http.HandlerFunc) http.Handler {
 		return s.correlationID(s.recoverPanic(spliced(s.panicMW, h)))
 	}
@@ -174,9 +170,6 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /v1/chat", chain(s.handleChat))
 	s.mux.Handle("GET /healthz", ops(s.handleHealthz))
 	s.mux.Handle("GET /readyz", ops(s.handleReadyz))
-	if s.metrics != nil {
-		s.mux.Handle("GET /metrics", ops(s.metrics.ServeHTTP))
-	}
 }
 
 // spliced layers mw around h, outermost first — spliced(mw, h) with

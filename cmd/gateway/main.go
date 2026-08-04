@@ -29,6 +29,9 @@ import (
 	gwlogs "github.com/FernasFragas/LLMGateway-Go/internal/logs/gateway"
 	keyslogs "github.com/FernasFragas/LLMGateway-Go/internal/logs/providerkeys"
 	"github.com/FernasFragas/LLMGateway-Go/internal/metrics/api"
+	gwmetrics "github.com/FernasFragas/LLMGateway-Go/internal/metrics/gateway"
+	"github.com/FernasFragas/LLMGateway-Go/internal/metrics/otlp"
+	keysmetrics "github.com/FernasFragas/LLMGateway-Go/internal/metrics/providerkeys"
 	"github.com/FernasFragas/LLMGateway-Go/internal/ollama"
 	"github.com/FernasFragas/LLMGateway-Go/internal/openai"
 	"github.com/FernasFragas/LLMGateway-Go/internal/providerkeys"
@@ -72,29 +75,32 @@ func newServer(cfg api.Config, core api.ChatService, checker *health.Checker,
 // and the unknown-caller log wrapped around the directory. The returned
 // JWKSCache is handed to auth.KeepFresh — the request path itself never touches
 // the network.
-func newAppDirectory(cfg config.Config, checker *health.Checker, log *slog.Logger) (gateway.AppDirectory, *auth.JWKSCache, error) {
+func newAppDirectory(cfg config.Config, checker *health.Checker, log *slog.Logger) (gateway.AppDirectory, *auth.JWKSCache, *gwmetrics.AppDirectory, error) {
 	// In a pod this client trusts the cluster CA and carries the gateway's own
 	// SA token to the RBAC-gated JWKS endpoint; outside one it is a plain
 	// default client, so local dev stays unconfigured. The environment, not a
 	// flag, selects the behavior.
 	client, err := auth.NewFetchClient(auth.DefaultServiceAccountDir)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	keys, err := auth.NewJWKSCache(cfg.JWKS.URL, client)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	dir, err := auth.NewDirectory(cfg.Auth, keys)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	checker.AddReadiness("jwks", keys.Ready)
 
-	return gwlogs.NewAppDirectory(dir, log), keys, nil
+	// Metrics innermost, logging outermost — the same seam newServer uses,
+	// so the log line and the counter always observe the same lookup.
+	metered := gwmetrics.NewAppDirectory(dir)
+	return gwlogs.NewAppDirectory(metered, log), keys, metered, nil
 }
 
 func main() {
@@ -133,7 +139,7 @@ func run() error {
 
 	checker := health.NewChecker()
 
-	dir, keys, err := newAppDirectory(cfg, checker, log)
+	dir, keys, dirMetrics, err := newAppDirectory(cfg, checker, log)
 	if err != nil {
 		log.Error("failed to build app directory", "error", err)
 		return err
@@ -143,7 +149,7 @@ func run() error {
 	jwksRefresh := authlogs.NewJWKSRefresher(keys, log)
 	go auth.KeepFresh(ctx, jwksRefresh, cfg.JWKS.RefreshInterval)
 
-	provider, err := newProviderClient(ctx, cfg, checker, log)
+	provider, providerMetrics, refreshMetrics, triggers, providerKeys, err := newProviderClient(ctx, cfg, checker, log)
 	if err != nil {
 		log.Error("failed to build provider client", "error", err)
 		return err
@@ -159,23 +165,43 @@ func run() error {
 		return err
 	}
 
+	// Metrics innermost, logging outermost, on every port — the same seam
+	// newServer already documents for the HTTP edge. UsageRecorder inverts
+	// it only because logs.NewUsageRecorder is a terminal sink with no next
+	// of its own: metrics wraps it instead, forwarding every call through.
+	rateLimiterMetrics := gwmetrics.NewRateLimiter(quotas)
+	slotLimiterMetrics := gwmetrics.NewSlotLimiter(slotting)
+	usageMetrics := gwmetrics.NewUsageRecorder(gwlogs.NewUsageRecorder(log))
+
 	core, err := gateway.New(cfg.Gateway, gateway.Deps{
 		Apps:        dir,
-		RateLimiter: gwlogs.NewRateLimiter(quotas, log),
-		Slots:       gwlogs.NewSlotLimiter(slotting, log),
-		Provider:    gwlogs.NewProviderClient(provider, log),
-		Usage:       gwlogs.NewUsageRecorder(log),
+		RateLimiter: gwlogs.NewRateLimiter(rateLimiterMetrics, log),
+		Slots:       gwlogs.NewSlotLimiter(slotLimiterMetrics, log),
+		Provider:    provider,
+		Usage:       usageMetrics,
 	})
 	if err != nil {
 		log.Error("failed to build gateway core", "error", err)
 		return err
 	}
 
-	// The metrics counters are the in-memory RequestMetrics/PanicCounter the
-	// edge already consumes; the OTLP/Prometheus provider and the /metrics
-	// handler are not built yet, so api.Deps.Metrics stays nil and that route
-	// 404s until the adapter lands.
-	srv, err := newServer(cfg.Server, core, checker, log, metrics.NewRequestMetrics(), metrics.NewPanicCounter())
+	// Per ADR-002, metrics leave via OTLP push to the collector, not a
+	// scrape endpoint — there is no /metrics route to wire. The exporter
+	// reads every counter above through observable instruments; a collector
+	// that's unreachable degrades exports, never the request path.
+	otlpProvider, err := otlp.NewProvider(ctx, cfg.Telemetry.OTLPEndpoint)
+	if err != nil {
+		log.Error("failed to build metrics exporter", "error", err)
+		return err
+	}
+	requestMetrics, panicMetrics := metrics.NewRequestMetrics(), metrics.NewPanicCounter()
+	if err := registerMetrics(otlpProvider, dirMetrics, rateLimiterMetrics, slotLimiterMetrics, providerMetrics, usageMetrics,
+		refreshMetrics, triggers, providerKeys, slotting, cfg, requestMetrics, panicMetrics); err != nil {
+		log.Error("failed to register metrics instruments", "error", err)
+		return err
+	}
+
+	srv, err := newServer(cfg.Server, core, checker, log, requestMetrics, panicMetrics)
 	if err != nil {
 		log.Error("failed to build server", "error", err)
 		return err
@@ -215,8 +241,42 @@ func run() error {
 		return err
 	}
 
+	// Flush whatever the last collection interval gathered; a lost final
+	// export is not worth extending the drain budget over.
+	if err := otlpProvider.Shutdown(shutdownCtx); err != nil {
+		log.Error("metrics exporter shutdown failed", "error", err)
+	}
+
 	log.Info("gateway stopped")
 	return nil
+}
+
+// registerMetrics attaches every port's observable instruments to the OTLP
+// provider. main constructs every counter above; this is just the seam that
+// hands them to the exporter, per the observability decorator rule — the
+// exporter never reaches into gateway or providerkeys business logic.
+func registerMetrics(p *otlp.Provider, dir *gwmetrics.AppDirectory, rl *gwmetrics.RateLimiter, sl *gwmetrics.SlotLimiter,
+	pc *gwmetrics.ProviderClient, usage *gwmetrics.UsageRecorder, refresher *keysmetrics.Refresher, triggers *keysmetrics.TriggerCounter,
+	keys *providerkeys.Cache, slotting *slots.Limiter, cfg config.Config, reqs *metrics.RequestMetrics, panics *metrics.PanicCounter,
+) error {
+	meter := p.Meter()
+
+	if err := otlp.RegisterGateway(meter, dir, rl, sl, pc, usage); err != nil {
+		return err
+	}
+	if err := otlp.RegisterProviderKeys(meter, refresher, triggers, keys, keys.Providers()); err != nil {
+		return err
+	}
+
+	apps := make([]string, 0, len(cfg.Limits))
+	for app := range cfg.Limits {
+		apps = append(apps, app)
+	}
+	if err := otlp.RegisterSlots(meter, slotting, apps); err != nil {
+		return err
+	}
+
+	return otlp.RegisterAPI(meter, reqs, panics)
 }
 
 const (
@@ -237,10 +297,12 @@ const (
 // the two fail independently by design, and a stalled secret store must not
 // mark the signing keys unready (decision #1). Its refresh loops run per
 // provider, each on its own cadence.
-func newProviderClient(ctx context.Context, cfg config.Config, checker *health.Checker, log *slog.Logger) (gateway.ProviderClient, error) {
+func newProviderClient(ctx context.Context, cfg config.Config, checker *health.Checker, log *slog.Logger) (
+	gateway.ProviderClient, *gwmetrics.ProviderClient, *keysmetrics.Refresher, *keysmetrics.TriggerCounter, *providerkeys.Cache, error,
+) {
 	fetcher, err := newFetcher(cfg.SecretSource)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 
 	sources := make(map[string]providerkeys.Source, len(cfg.SecretSource.Providers))
@@ -250,14 +312,15 @@ func newProviderClient(ctx context.Context, cfg config.Config, checker *health.C
 
 	keys, err := providerkeys.New(fetcher, sources)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	checker.AddReadiness("provider-keys", keys.Ready)
 
 	// Every background refresh — periodic and post-rejection — runs through
-	// the logging decorator; the cache's loops own the cadence, main only
-	// injects what they call.
-	keys.RefreshVia(keyslogs.NewRefresher(keys, log))
+	// metrics then logging: metrics innermost so the counter and the log
+	// line observe the identical error.
+	refreshMetrics := keysmetrics.NewRefresher(keys)
+	keys.RefreshVia(keyslogs.NewRefresher(refreshMetrics, log))
 
 	// Load once before serving, then per provider on its own timer. A failed
 	// first load is not fatal: readiness holds the pod out of rotation, and
@@ -270,10 +333,12 @@ func newProviderClient(ctx context.Context, cfg config.Config, checker *health.C
 		go keys.KeepFresh(ctx, provider)
 	}
 
+	triggers := keysmetrics.NewTriggerCounter()
+
 	// Each adapter is handed an accessor, never a string: a key rotates under
 	// a running pod, and a copy taken here would freeze at boot (ADR-001).
 	client := &http.Client{}
-	return providers.NewRouter(map[string]gateway.ProviderClient{
+	router, err := providers.NewRouter(map[string]gateway.ProviderClient{
 		"openai":    openai.NewOpenAI(client, keys.Key("openai")),
 		"anthropic": anthropic.NewAnthropic(client, keys.Key("anthropic")),
 		"ollama":    ollama.NewOllama(client, keys.Key("ollama")),
@@ -282,8 +347,17 @@ func newProviderClient(ctx context.Context, cfg config.Config, checker *health.C
 		// returns immediately — the refresh happens off the request path.
 		if keys.TriggerRefresh(provider) {
 			log.Warn("provider refused our credential; refreshing out of band", "provider", provider)
+			triggers.Trigger(provider)
 		}
 	})
+	if err != nil {
+		return nil, nil, nil, nil, nil, err
+	}
+
+	// Metrics innermost, logging outermost — the same seam every other
+	// gateway port uses.
+	providerMetrics := gwmetrics.NewProviderClient(router)
+	return gwlogs.NewProviderClient(providerMetrics, log), providerMetrics, refreshMetrics, triggers, keys, nil
 }
 
 // newFetcher picks how credentials are read. Both kinds ship; an unknown kind
@@ -313,7 +387,7 @@ func newFetcher(src config.SecretSource) (providerkeys.Fetcher, error) {
 // The Redis client dials lazily: a quota store that is down must not stop the
 // gateway from booting, because rate limiting fails open and identity does not
 // depend on it (decision #1).
-func newLimiters(cfg config.Config) (gateway.RateLimiter, gateway.SlotLimiter, error) {
+func newLimiters(cfg config.Config) (*redis.Limiter, *slots.Limiter, error) {
 	rps := make(map[string]int, len(cfg.Limits))
 	ceilings := make(map[string]int, len(cfg.Limits))
 	for app, limits := range cfg.Limits {

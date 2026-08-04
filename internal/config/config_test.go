@@ -51,7 +51,7 @@ func TestExampleFileIsTheExecutableSchema(t *testing.T) {
 	if cfg.GlobalMaxInFlight != 800 {
 		t.Errorf("GlobalMaxInFlight = %d, want 800", cfg.GlobalMaxInFlight)
 	}
-	if cfg.Redis.Addr == "" || cfg.SecretSource.Kind != "vault" || cfg.Telemetry.MetricsListen != ":9090" {
+	if cfg.Redis.Addr == "" || cfg.SecretSource.Kind != "vault" || cfg.Telemetry.OTLPEndpoint == "" {
 		t.Errorf("infra sections = %+v %+v %+v, want the example's", cfg.Redis, cfg.SecretSource, cfg.Telemetry)
 	}
 

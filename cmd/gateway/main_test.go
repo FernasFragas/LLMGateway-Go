@@ -110,7 +110,7 @@ func TestMintedTokenReachesTheModelStrangersDoNot(t *testing.T) {
 
 	log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 	checker := health.NewChecker()
-	dir, keys, err := newAppDirectory(config.Config{
+	dir, keys, _, err := newAppDirectory(config.Config{
 		Auth: auth.Config{
 			Issuer:   tokenIssuer,
 			Audience: "llm-gateway",

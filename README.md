@@ -20,7 +20,6 @@ with per-app failover policies, rate + slot limiting, and full cost visibility.
 graph LR
     RAG[RAG API] -->|"HTTP/JSON + bound SA token"| GW
     AGENT[Agent service] -->|"HTTP/JSON + bound SA token"| GW
-    PROM[Prometheus] -->|scrapes /metrics| GW
 
     GW["LLMGateway-Go<br/>auth (JWKS cache), rate limiting,<br/>routing, fallback, observability"]
 
@@ -34,7 +33,8 @@ graph LR
     GW -->|HTTPS| P2
     GW -->|"HTTP, local"| P3
 
-    GW -->|"OTLP traces + logs"| OTEL[OTel Collector]
+    GW -->|"OTLP metrics + traces + logs"| OTEL[OTel Collector]
+    OTEL -->|"forwards metrics"| PROM[Prometheus]
     GW -.->|"quotas + breaker state (fail open)"| REDIS[("Redis")]
     GW -.->|"signing keys: startup load + TTL refresh (fail static)"| JWKS[("kube-apiserver JWKS")]
     GW -.->|"provider keys: per-provider TTL + refresh on upstream 401 (fail static)"| SECRETS[("Secret source<br/>Vault / files")]

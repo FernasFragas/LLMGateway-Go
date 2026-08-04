@@ -47,7 +47,9 @@ tags:
   - name: chat
     description: The data path — OpenAI-compatible chat completions.
   - name: ops
-    description: Probes and metrics for Kubernetes and Prometheus.
+    description: >
+      Probes for Kubernetes. Metrics are not served over HTTP — the gateway
+      pushes them via OTLP to the collector, alongside traces and logs.
 
 security:
   - bearerAuth: []
@@ -144,23 +146,6 @@ paths:
       responses:
         '200': { description: Key cache warm; pod may receive traffic. }
         '503': { description: No key cache; Service routes around this pod. }
-
-  /metrics:
-    get:
-      tags: [ops]
-      summary: Prometheus metrics
-      description: >
-        llm_tokens_total, in_flight, concurrency_limit_rejections_total,
-        double_spend_risk_total, unobserved_spend_tokens_estimate,
-        key_cache_age_seconds, latency histograms — labeled by app and provider.
-      operationId: metrics
-      security: []
-      responses:
-        '200':
-          description: Prometheus text exposition format.
-          content:
-            text/plain:
-              schema: { type: string }
 
 components:
 

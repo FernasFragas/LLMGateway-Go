@@ -86,10 +86,11 @@ type ProviderSecret struct {
 	RefreshInterval time.Duration
 }
 
-// Telemetry is the observability plumbing's addresses.
+// Telemetry is the observability plumbing's addresses. Metrics, traces, and
+// logs all leave over this one OTLP endpoint (ADR-002) — there is no
+// separate scrape port.
 type Telemetry struct {
-	OTLPEndpoint  string
-	MetricsListen string
+	OTLPEndpoint string
 }
 
 // defaultRefreshInterval keeps a warm key cache honest without hammering the
@@ -198,8 +199,7 @@ type providerSecretWire struct {
 }
 
 type telemetryWire struct {
-	OTLPEndpoint  string `yaml:"otlp_endpoint"`
-	MetricsListen string `yaml:"metrics_listen"`
+	OTLPEndpoint string `yaml:"otlp_endpoint"`
 }
 
 func (w wire) toDomain() (Config, error) {
@@ -294,7 +294,7 @@ func (w wire) toDomain() (Config, error) {
 		GlobalMaxInFlight: w.Server.GlobalMaxInFlight,
 		Redis:             Redis{Addr: w.Redis.Addr},
 		SecretSource:      secrets,
-		Telemetry:         Telemetry{OTLPEndpoint: w.Telemetry.OTLPEndpoint, MetricsListen: w.Telemetry.MetricsListen},
+		Telemetry:         Telemetry{OTLPEndpoint: w.Telemetry.OTLPEndpoint},
 	}, nil
 }
 
