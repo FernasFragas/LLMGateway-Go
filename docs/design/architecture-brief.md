@@ -133,7 +133,7 @@ Honest consequence, today: with the current three providers, no model is served 
 ### Observability & ops
 
 - Traceability is end-to-end. A request sent with X-Correlation-ID: test-123 echoes the ID in the response, and a log query, metric exemplar, and trace lookup for test-123 all hit. Violated if the ID is absent from any signal.
-- Usage is recorded. After one request, /metrics shows llm_tokens_total{app,provider} incremented and a latency histogram observation. Violated if counters are unchanged.
+- Usage is recorded. After one request, the metrics backend shows `llm_tokens_total{app,provider}` incremented and a latency histogram observation within one export interval — metrics leave the gateway via OTLP push, not a scrape endpoint (see [ADR-002](../ADRs/ADR-002-metrics-exposition.md)). Violated if the series are unchanged after an export interval has elapsed.
 - Health reflects dependencies, per cache and independently. GET /healthz returns 200 {"status":"ok"}. With the secret source stopped: a warm instance keeps serving (fail static) and `provider_key_cache_age_seconds{provider}` rises for each affected provider; a freshly restarted instance with no servable route — every keyed provider's source unread and no keyless route configured — never reports ready. With the JWKS endpoint stopped, the same two behaviors hold against `jwks_cache_age_seconds`. Each cache gates readiness on its own — a stalled secret source must not mark the JWKS cache unready, or vice versa — and one provider's unreachable source must not hold back a provider whose own source read fine. Violated if a warm instance goes unready during either outage, if an instance with no servable route receives traffic, if a deployment that configures no provider secrets at all (every route self-hosted) fails readiness — having nothing to load is a valid steady state, not a cold cache — or if one provider's unreachable source makes the instance unready while another provider's route is servable.
 
 ## Failure Modes
@@ -190,7 +190,6 @@ Honest consequence, today: with the current three providers, no model is served 
 graph LR
     RAG[RAG API] -->|"HTTP/JSON + bound SA token"| GW
     AGENT[Agent service] -->|"HTTP/JSON + bound SA token"| GW
-    PROM[Prometheus] -->|scrapes /metrics| GW
 
     GW["LLMGateway-Go<br/>auth (JWKS cache), rate limiting,<br/>routing, fallback, observability"]
 
@@ -204,7 +203,8 @@ graph LR
     GW -->|HTTPS| P2
     GW -->|"HTTP, local"| P3
 
-    GW -->|"OTLP traces + logs"| OTEL[OTel Collector]
+    GW -->|"OTLP metrics + traces + logs"| OTEL[OTel Collector]
+    OTEL -->|"forwards metrics"| PROM[Prometheus]
     GW -.->|"quotas + breaker state (fail open)"| REDIS[("Redis")]
     GW -.->|"signing keys: startup load + TTL refresh (fail static)"| JWKS[("kube-apiserver JWKS")]
     GW -.->|"provider keys: per-provider TTL + refresh on upstream 401 (fail static)"| SECRETS[("Secret source<br/>Vault / files")]
@@ -219,7 +219,7 @@ graph LR
 - No orchestration. One request in, one model call out (plus failover). Chains, agent loops, and RAG logic belong to the apps — the moment the gateway "thinks," it competes with its own callers.
 - No model intelligence. Routing is config-driven, never content-based ("send hard questions to the big model" is an app decision). The gateway never judges two models interchangeable: the routes list records which endpoints serve which model — transport facts; substitution allowlists are each app's own declaration. No equivalence table exists, deliberately.
 - Not a public API. It runs inside my Kubernetes cluster for my apps; no internet exposure, no external keys.
-- Not a billing system. It attributes spend; it doesn't invoice, budget, or block on cost. The numbers feed dashboards, nothing more.
+- Not a billing system. It attributes spend; it doesn't invoice, price requests, or route on cost. The numbers feed dashboards, nothing more. Token *rate* is the one exception, and it isn't a cost control: `tokens_per_minute` is a capacity currency in the same family as rps and slots, because the providers themselves meter tokens per minute — an app that burns the shared upstream allowance turns into 429s for every other app (ADR-003).
 
 ### Out of scope for now
 
