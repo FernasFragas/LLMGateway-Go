@@ -10,6 +10,14 @@
 | **Start date** | 2026-08-03 |
 | **End date** | 2026-08-04 |
 
+## Errata (2026-08-04)
+
+Option 2 is rejected partly on the claim that `max_tokens` is optional, so a reservation would need a per-app default to guess with. **That is wrong.** `max_tokens` is required: `openapi.yaml` lists it under `required`, and `ChatRequest.Validate` rejects anything below 1. It is required because Anthropic's API requires it, and the unified schema takes the strictest provider's floor.
+
+So a reservation always has a real number to hold, and needs no guessing knob.
+
+The decision does not change. Option 2's other costs are untouched — a reservation ledger with its own expiry, over-reserving punishing callers who set a generous `max_tokens`, and 3–4 Redis ops per request instead of 2 — and those are enough on their own. But the comparison is closer than the text below makes it look, and the *Revisit When* trigger should be read with that in mind.
+
 ## Purpose
 
 This document is the source of truth for how the third rate currency — tokens per minute — is metered, and for why the key was not simply deleted. It closes GW-104 and defines exactly what GW-105 builds: the semantics, the port, the Redis key shape, the failure behavior, and the limitations that ship with it.
@@ -70,7 +78,7 @@ This document is the source of truth for how the third rate currency — tokens 
 - Concurrency-safe by construction — the noisy-neighbor case this ADR exists for is fully priced before it happens.
 
 **Cons:**
-- `max_tokens` is optional in the OpenAI-compatible schema this gateway accepts. Requests without it need a per-app default reservation — a config knob whose only job is to guess, and whose wrongness silently over- or under-throttles.
+- ~~`max_tokens` is optional in the OpenAI-compatible schema this gateway accepts. Requests without it need a per-app default reservation — a config knob whose only job is to guess, and whose wrongness silently over- or under-throttles.~~ **Wrong — see Errata. `max_tokens` is required, so no default is needed.**
 - Reservations that never settle need their own expiry, which is a second lifetime to get right on top of the window's.
 - Over-reserving punishes well-behaved callers: an app that sets a generous `max_tokens` and consistently uses a fraction of it gets throttled on tokens it never spent.
 - Three to four Redis ops per served request rather than two.
