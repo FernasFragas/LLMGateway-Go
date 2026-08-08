@@ -39,6 +39,13 @@ func (e *Error) Error() string {
 }
 
 // QuotaDetail describes the rate window that refused a request.
+//
+// Both rate currencies refuse with CodeQuotaExceeded, so WindowSeconds is
+// what tells them apart: 1 is the request-rate quota counting requests, 60 is
+// the token budget counting tokens (ADR-003). Units follow from the window
+// rather than being named separately — the alternative, a currency field,
+// would add a wire concept callers would have to learn to read a number the
+// window already explains.
 type QuotaDetail struct {
 	Limit         int
 	WindowSeconds int

@@ -41,7 +41,7 @@ var gatewayErrorCodes = []gateway.ErrorCode{
 // error code); a labeled llm_tokens_total{app,provider} would need the
 // counters themselves to grow an app/provider-keyed map, which is a
 // separate decision from wiring the exporter this ADR describes.
-func RegisterGateway(meter metric.Meter, apps *gwmetrics.AppDirectory, rl *gwmetrics.RateLimiter, sl *gwmetrics.SlotLimiter, pc *gwmetrics.ProviderClient, usage *gwmetrics.UsageRecorder) error {
+func RegisterGateway(meter metric.Meter, apps *gwmetrics.AppDirectory, rl *gwmetrics.RateLimiter, tl *gwmetrics.TokenLimiter, sl *gwmetrics.SlotLimiter, pc *gwmetrics.ProviderClient, usage *gwmetrics.UsageRecorder) error {
 	if _, err := meter.Int64ObservableCounter("gateway_key_resolved_total",
 		metric.WithDescription("API keys resolved to a known app"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
@@ -86,6 +86,59 @@ func RegisterGateway(meter metric.Meter, apps *gwmetrics.AppDirectory, rl *gwmet
 		metric.WithDescription("requests admitted unmetered because the rate limiter itself failed"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
 			o.Observe(rl.FailOpen())
+			return nil
+		}),
+	); err != nil {
+		return err
+	}
+
+	if _, err := meter.Int64ObservableCounter("gateway_token_budget_allowed_total",
+		metric.WithDescription("requests admitted with token budget left"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(tl.Allowed())
+			return nil
+		}),
+	); err != nil {
+		return err
+	}
+
+	if _, err := meter.Int64ObservableCounter("gateway_token_budget_denied_total",
+		metric.WithDescription("requests a spent token budget refused"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(tl.Denied())
+			return nil
+		}),
+	); err != nil {
+		return err
+	}
+
+	if _, err := meter.Int64ObservableCounter("gateway_token_budget_fail_open_total",
+		metric.WithDescription("requests admitted unmetered because the token limiter itself failed"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(tl.FailOpen())
+			return nil
+		}),
+	); err != nil {
+		return err
+	}
+
+	if _, err := meter.Int64ObservableCounter("gateway_tokens_debited_total",
+		metric.WithDescription("tokens successfully charged against per-app budgets"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(tl.Debited())
+			return nil
+		}),
+	); err != nil {
+		return err
+	}
+
+	// Distinct from fail-open on purpose (ADR-003): the request succeeded and
+	// only the accounting was lost, so a window under-charges until it rolls.
+	// Sharing the fail-open series would read as an outage that never happened.
+	if _, err := meter.Int64ObservableCounter("gateway_token_debit_failed_total",
+		metric.WithDescription("served completions whose cost never reached the budget"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(tl.DebitsFailed())
 			return nil
 		}),
 	); err != nil {

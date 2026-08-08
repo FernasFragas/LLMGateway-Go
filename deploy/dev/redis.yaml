@@ -1,0 +1,62 @@
+# Dev-only Redis: the quota store the rate and token currencies share.
+#
+# Without it both limiters fail open — every request is admitted unmetered and
+# the degradation is recorded (decision #1). That is correct behavior, but it
+# means rps and tokens_per_minute cannot be *observed* enforcing anything, so
+# this is what turns those two features from "wired" into "testable".
+#
+# Single replica, no persistence, no auth: quota counters are disposable by
+# design (fixed windows with a TTL measured in seconds), and losing them costs
+# one unenforced window. Nothing here is a production Redis.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: llm
+  labels:
+    app: redis
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: llm
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          # Quota state is disposable; never spend a disk write on it.
+          args: ["--save", "", "--appendonly", "no"]
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 128Mi

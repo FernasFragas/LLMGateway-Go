@@ -93,6 +93,16 @@ func (l limiter) Allow(context.Context, string) (gateway.RateDecision, error) {
 	return l.decision, l.err
 }
 
+type tokenStub struct {
+	decision gateway.RateDecision
+}
+
+func (t tokenStub) Check(context.Context, string) (gateway.RateDecision, error) {
+	return t.decision, nil
+}
+
+func (tokenStub) Settle(context.Context, string, int) error { return nil }
+
 type slotStub struct {
 	full    bool
 	ceiling int

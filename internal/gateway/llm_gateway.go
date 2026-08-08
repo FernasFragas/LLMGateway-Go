@@ -44,6 +44,25 @@ type RateLimiter interface {
 	Allow(ctx context.Context, app string) (RateDecision, error)
 }
 
+// TokenLimiter meters the second rate currency: tokens per minute, per app.
+// The providers cap tokens per minute on the credential every app shares, so
+// an app's portion of that allowance is priced here rather than discovered as
+// another app's 429 (ADR-003).
+//
+// It is split in two because a completion's cost does not exist until the
+// provider answers. Check judges spend that has already settled — tokens in
+// flight are invisible to it, so the budget is a soft ceiling whose overshoot
+// is bounded by the app's slot ceiling, not by the budget. Errors from either
+// method mean the limiter itself failed; the core fails open, exactly as it
+// does for RateLimiter.
+type TokenLimiter interface {
+	// Check reports whether app has budget left in the current window.
+	Check(ctx context.Context, app string) (RateDecision, error)
+	// Settle debits what a served completion actually cost. It runs after the
+	// answer exists, so its error can never refuse the request.
+	Settle(ctx context.Context, app string, tokens int) error
+}
+
 // SlotLimiter meters the third currency: in-flight slots (decision #7).
 // Rate quotas alone don't isolate — an app can sit far under its rps quota
 // while holding hundreds of slots for minutes. Implementations enforce the
@@ -116,6 +135,7 @@ type Config struct {
 type Deps struct {
 	Apps        AppDirectory
 	RateLimiter RateLimiter
+	Tokens      TokenLimiter
 	Slots       SlotLimiter
 	Provider    ProviderClient
 	Usage       UsageRecorder // optional; nil records nothing
@@ -127,6 +147,7 @@ type Service struct {
 	cfg      Config
 	apps     AppDirectory
 	limits   RateLimiter
+	tokens   TokenLimiter
 	slots    SlotLimiter
 	provider ProviderClient
 	usage    UsageRecorder
@@ -138,6 +159,8 @@ func New(cfg Config, deps Deps) (*Service, error) {
 		return nil, errors.New("gateway: AppDirectory is required")
 	case deps.RateLimiter == nil:
 		return nil, errors.New("gateway: RateLimiter is required")
+	case deps.Tokens == nil:
+		return nil, errors.New("gateway: TokenLimiter is required")
 	case deps.Slots == nil:
 		return nil, errors.New("gateway: SlotLimiter is required")
 	case deps.Provider == nil:
@@ -156,6 +179,7 @@ func New(cfg Config, deps Deps) (*Service, error) {
 		cfg:      cfg,
 		apps:     deps.Apps,
 		limits:   deps.RateLimiter,
+		tokens:   deps.Tokens,
 		slots:    deps.Slots,
 		provider: deps.Provider,
 		usage:    deps.Usage,
@@ -204,6 +228,23 @@ func (s *Service) Chat(ctx context.Context, apiKey string, req ChatRequest) (Cha
 		}
 	}
 
+	// The token budget is checked second: the rps verdict is cheaper and
+	// exact, so a request refused on requests never costs a token read.
+	budget, err := s.tokens.Check(ctx, app.Name)
+	switch {
+	case err != nil:
+		s.usage.RecordRateLimiterFailOpen(app.Name)
+	case !budget.Allowed:
+		s.usage.RecordRejection(app.Name, CodeQuotaExceeded)
+
+		return ChatResult{}, &Error{
+			Code:       CodeQuotaExceeded,
+			Message:    fmt.Sprintf("%s is over its token budget", app.Name),
+			RetryAfter: budget.RetryAfter,
+			Quota:      budget.Quota,
+		}
+	}
+
 	release, ceiling, ok := s.slots.TryAcquire(app.Name)
 	if !ok {
 		s.usage.RecordRejection(app.Name, CodeConcurrencyCeiling)
@@ -247,6 +288,7 @@ func (s *Service) Chat(ctx context.Context, apiKey string, req ChatRequest) (Cha
 		completion, err := s.tryModelProvider(ctx, mp, req)
 		if err == nil {
 			s.usage.RecordCompletion(app.Name, mp, completion.Usage, time.Since(start), attempts > 1)
+			s.settle(ctx, app.Name, completion.Usage)
 
 			return ChatResult{
 				Model:        mp.Model, // what actually served — never an echo (decision #5)
@@ -293,6 +335,22 @@ func (s *Service) Chat(ctx context.Context, apiKey string, req ChatRequest) (Cha
 	s.usage.RecordRejection(app.Name, CodeUpstreamFailed)
 
 	return ChatResult{}, &Error{Code: CodeUpstreamFailed, Message: "all eligible provider attempts failed"}
+}
+
+// settle debits what a served completion cost against the app's token budget.
+//
+// Only served completions debit. An attempt that timed out, returned garbage,
+// or was abandoned by its caller may still be billed upstream, but the gateway
+// holds an upper-bound estimate for it rather than a fact — and an estimate
+// that refuses real traffic is worse than a budget that runs slightly loose
+// (ADR-003). Those attempts are already priced in unobserved-spend.
+//
+// The error is dropped on purpose: the caller is about to receive a real
+// answer the provider has already billed for, and failing that request over
+// an accounting write would trade the answer for the bookkeeping. The
+// decorators log and count the loss.
+func (s *Service) settle(ctx context.Context, app string, usage Usage) {
+	_ = s.tokens.Settle(ctx, app, usage.PromptTokens+usage.CompletionTokens)
 }
 
 func (s *Service) tryModelProvider(ctx context.Context, mp ModelProvider, req ChatRequest) (Completion, error) {

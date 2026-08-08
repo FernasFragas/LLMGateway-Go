@@ -37,6 +37,24 @@ func (l limiter) Allow(context.Context, string) (gateway.RateDecision, error) {
 	return l.decision, l.err
 }
 
+// tokenLimiter stubs the two-phase token port and remembers what was debited,
+// so a test can assert the decorator forwarded the cost unchanged.
+type tokenLimiter struct {
+	decision  gateway.RateDecision
+	checkErr  error
+	settleErr error
+	settled   []int
+}
+
+func (l *tokenLimiter) Check(context.Context, string) (gateway.RateDecision, error) {
+	return l.decision, l.checkErr
+}
+
+func (l *tokenLimiter) Settle(_ context.Context, _ string, tokens int) error {
+	l.settled = append(l.settled, tokens)
+	return l.settleErr
+}
+
 type slots struct {
 	full    bool
 	ceiling int

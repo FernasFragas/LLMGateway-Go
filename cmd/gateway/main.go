@@ -155,11 +155,12 @@ func run() error {
 		return err
 	}
 
-	// Both currencies, each in the store its failure mode demands: quotas in
-	// Redis so an app's rps is one budget across replicas (and fails open when
-	// it is down), slots in this process because a semaphore cannot fail and
-	// the global cap's job is bounding this process's memory.
-	quotas, slotting, err := newLimiters(cfg)
+	// Every currency, each in the store its failure mode demands: rate quotas
+	// and token budgets in Redis so an app's rps and tokens per minute are one
+	// budget across replicas (and fail open when it is down), slots in this
+	// process because a semaphore cannot fail and the global cap's job is
+	// bounding this process's memory.
+	quotas, budgets, slotting, err := newLimiters(cfg)
 	if err != nil {
 		log.Error("failed to build limiters", "error", err)
 		return err
@@ -170,12 +171,14 @@ func run() error {
 	// it only because logs.NewUsageRecorder is a terminal sink with no next
 	// of its own: metrics wraps it instead, forwarding every call through.
 	rateLimiterMetrics := gwmetrics.NewRateLimiter(quotas)
+	tokenLimiterMetrics := gwmetrics.NewTokenLimiter(budgets)
 	slotLimiterMetrics := gwmetrics.NewSlotLimiter(slotting)
 	usageMetrics := gwmetrics.NewUsageRecorder(gwlogs.NewUsageRecorder(log))
 
 	core, err := gateway.New(cfg.Gateway, gateway.Deps{
 		Apps:        dir,
 		RateLimiter: gwlogs.NewRateLimiter(rateLimiterMetrics, log),
+		Tokens:      gwlogs.NewTokenLimiter(tokenLimiterMetrics, log),
 		Slots:       gwlogs.NewSlotLimiter(slotLimiterMetrics, log),
 		Provider:    provider,
 		Usage:       usageMetrics,
@@ -195,7 +198,7 @@ func run() error {
 		return err
 	}
 	requestMetrics, panicMetrics := metrics.NewRequestMetrics(), metrics.NewPanicCounter()
-	if err := registerMetrics(otlpProvider, dirMetrics, rateLimiterMetrics, slotLimiterMetrics, providerMetrics, usageMetrics,
+	if err := registerMetrics(otlpProvider, dirMetrics, rateLimiterMetrics, tokenLimiterMetrics, slotLimiterMetrics, providerMetrics, usageMetrics,
 		refreshMetrics, triggers, providerKeys, slotting, cfg, requestMetrics, panicMetrics); err != nil {
 		log.Error("failed to register metrics instruments", "error", err)
 		return err
@@ -255,13 +258,14 @@ func run() error {
 // provider. main constructs every counter above; this is just the seam that
 // hands them to the exporter, per the observability decorator rule — the
 // exporter never reaches into gateway or providerkeys business logic.
-func registerMetrics(p *otlp.Provider, dir *gwmetrics.AppDirectory, rl *gwmetrics.RateLimiter, sl *gwmetrics.SlotLimiter,
-	pc *gwmetrics.ProviderClient, usage *gwmetrics.UsageRecorder, refresher *keysmetrics.Refresher, triggers *keysmetrics.TriggerCounter,
+func registerMetrics(p *otlp.Provider, dir *gwmetrics.AppDirectory, rl *gwmetrics.RateLimiter, tl *gwmetrics.TokenLimiter,
+	sl *gwmetrics.SlotLimiter, pc *gwmetrics.ProviderClient, usage *gwmetrics.UsageRecorder,
+	refresher *keysmetrics.Refresher, triggers *keysmetrics.TriggerCounter,
 	keys *providerkeys.Cache, slotting *slots.Limiter, cfg config.Config, reqs *metrics.RequestMetrics, panics *metrics.PanicCounter,
 ) error {
 	meter := p.Meter()
 
-	if err := otlp.RegisterGateway(meter, dir, rl, sl, pc, usage); err != nil {
+	if err := otlp.RegisterGateway(meter, dir, rl, tl, sl, pc, usage); err != nil {
 		return err
 	}
 	if err := otlp.RegisterProviderKeys(meter, refresher, triggers, keys, keys.Providers()); err != nil {
@@ -387,23 +391,30 @@ func newFetcher(src config.SecretSource) (providerkeys.Fetcher, error) {
 // The Redis client dials lazily: a quota store that is down must not stop the
 // gateway from booting, because rate limiting fails open and identity does not
 // depend on it (decision #1).
-func newLimiters(cfg config.Config) (*redis.Limiter, *slots.Limiter, error) {
+func newLimiters(cfg config.Config) (*redis.Limiter, *redis.TokenLimiter, *slots.Limiter, error) {
 	rps := make(map[string]int, len(cfg.Limits))
+	budgets := make(map[string]int, len(cfg.Limits))
 	ceilings := make(map[string]int, len(cfg.Limits))
 	for app, limits := range cfg.Limits {
 		rps[app] = limits.RPS
+		budgets[app] = limits.TokensPerMinute
 		ceilings[app] = limits.MaxInFlight
 	}
 
+	// Both rate currencies share one client: they are the same store, the same
+	// fail-open policy, and the same key convention — only the window differs.
 	client, err := redis.NewClient(cfg.Redis.Addr, redisPoolSize)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	return redis.NewLimiter(client, rps), slots.New(cfg.GlobalMaxInFlight, ceilings), nil
+	return redis.NewLimiter(client, rps),
+		redis.NewTokenLimiter(client, budgets),
+		slots.New(cfg.GlobalMaxInFlight, ceilings),
+		nil
 }
 
 // redisPoolSize is small on purpose: the brief budgets ~3 ops per request
-// against a store nowhere near its limits, so connections are reused rather
-// than multiplied.
+// against a store nowhere near its limits — ~5 since the token currency
+// landed (ADR-003) — so connections are reused rather than multiplied.
 const redisPoolSize = 8

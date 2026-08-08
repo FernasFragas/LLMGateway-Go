@@ -53,6 +53,20 @@ func (l limiter) Allow(context.Context, string) (gateway.RateDecision, error) {
 	return l.decision, l.err
 }
 
+// tokenLimiter stubs the two-phase token port; each phase fails on its own so
+// the log's two distinct messages can be told apart.
+type tokenLimiter struct {
+	decision  gateway.RateDecision
+	checkErr  error
+	settleErr error
+}
+
+func (l tokenLimiter) Check(context.Context, string) (gateway.RateDecision, error) {
+	return l.decision, l.checkErr
+}
+
+func (l tokenLimiter) Settle(context.Context, string, int) error { return l.settleErr }
+
 type slots struct {
 	full    bool
 	ceiling int

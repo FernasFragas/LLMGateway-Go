@@ -40,6 +40,7 @@ type fixture struct {
 	cfg      Config
 	apps     fakeApps
 	limiter  *fakeLimiter
+	tokens   *fakeTokens
 	slots    *fakeSlots
 	provider *scriptedProvider
 	rec      *eventLog
@@ -71,6 +72,7 @@ func newGateway(t *testing.T, opts ...option) *fixture {
 			"bot-key":   {Name: "support-bot", Policy: allowing("claude-sonnet-4")},
 		},
 		limiter:  &fakeLimiter{decision: RateDecision{Allowed: true}},
+		tokens:   &fakeTokens{decision: RateDecision{Allowed: true}},
 		slots:    &fakeSlots{},
 		provider: &scriptedProvider{stubs: map[string]stub{}},
 		rec:      &eventLog{},
@@ -83,6 +85,7 @@ func newGateway(t *testing.T, opts ...option) *fixture {
 	svc, err := New(f.cfg, Deps{
 		Apps:        f.apps,
 		RateLimiter: f.limiter,
+		Tokens:      f.tokens,
 		Slots:       f.slots,
 		Provider:    f.provider,
 		Usage:       f.rec,
@@ -122,6 +125,20 @@ func quotaDenied(retryAfter time.Duration, quota QuotaDetail) option {
 
 func limiterDown() option {
 	return func(f *fixture) { f.limiter.err = errors.New("redis: connection refused") }
+}
+
+func tokenBudgetSpent(retryAfter time.Duration, quota QuotaDetail) option {
+	return func(f *fixture) {
+		f.tokens.decision = RateDecision{Allowed: false, RetryAfter: retryAfter, Quota: &quota}
+	}
+}
+
+func tokenLimiterDown() option {
+	return func(f *fixture) { f.tokens.checkErr = errors.New("redis: connection refused") }
+}
+
+func debitsFailing() option {
+	return func(f *fixture) { f.tokens.settleErr = errors.New("redis: connection refused") }
 }
 
 func slotsFull(ceiling int) option {
@@ -177,6 +194,24 @@ type fakeLimiter struct {
 
 func (l *fakeLimiter) Allow(context.Context, string) (RateDecision, error) {
 	return l.decision, l.err
+}
+
+// fakeTokens answers the budget check from a fixed decision and records every
+// debit, so a scenario can assert both what was charged and what never was.
+type fakeTokens struct {
+	decision  RateDecision
+	checkErr  error
+	settleErr error
+	debits    []int
+}
+
+func (l *fakeTokens) Check(context.Context, string) (RateDecision, error) {
+	return l.decision, l.checkErr
+}
+
+func (l *fakeTokens) Settle(_ context.Context, _ string, tokens int) error {
+	l.debits = append(l.debits, tokens)
+	return l.settleErr
 }
 
 type fakeSlots struct {

@@ -136,7 +136,7 @@ func TestMintedTokenReachesTheModelStrangersDoNot(t *testing.T) {
 		ModelProviders: []gateway.ModelProvider{{Model: "gpt-4.1", Provider: "openai", Endpoint: "http://fake"}},
 		TotalDeadline:  5 * time.Second,
 		PerTryDeadline: time.Second,
-	}, gateway.Deps{Apps: dir, RateLimiter: openGate{}, Slots: freeSlots{}, Provider: answering{}})
+	}, gateway.Deps{Apps: dir, RateLimiter: openGate{}, Tokens: openBudget{}, Slots: freeSlots{}, Provider: answering{}})
 	if err != nil {
 		t.Fatalf("gateway.New: %v", err)
 	}
@@ -220,13 +220,21 @@ func mintToken(t *testing.T, key *rsa.PrivateKey, kid string, overrides map[stri
 	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig)
 }
 
-// openGate, freeSlots, and answering stand in for the limiter, slot, and
-// provider adapters still to come — this test is about identity, not limits.
+// openGate, openBudget, freeSlots, and answering stand in for the limiter,
+// slot, and provider adapters — this test is about identity, not limits.
 type openGate struct{}
 
 func (openGate) Allow(context.Context, string) (gateway.RateDecision, error) {
 	return gateway.RateDecision{Allowed: true}, nil
 }
+
+type openBudget struct{}
+
+func (openBudget) Check(context.Context, string) (gateway.RateDecision, error) {
+	return gateway.RateDecision{Allowed: true}, nil
+}
+
+func (openBudget) Settle(context.Context, string, int) error { return nil }
 
 type freeSlots struct{}
 

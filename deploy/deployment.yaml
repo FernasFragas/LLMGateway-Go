@@ -71,7 +71,20 @@ spec:
             - name: config
               mountPath: /etc/gateway
               readOnly: true
+            # One file per provider, the paths secret_source names. A
+            # Kubernetes Secret volume produces exactly that shape — one file
+            # per data key — which is why kind: file needs no format (ADR-001).
+            - name: provider-keys
+              mountPath: /etc/gateway/keys
+              readOnly: true
       volumes:
         - name: config
           configMap:
             name: llm-gateway-config
+        # optional: the pod must still start without it. A missing credential
+        # is not a boot failure — it gates readiness, so the pod refuses
+        # traffic instead of serving requests it cannot fulfil (ADR-001).
+        - name: provider-keys
+          secret:
+            secretName: llm-gateway-provider-keys
+            optional: true

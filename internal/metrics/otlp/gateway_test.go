@@ -18,6 +18,10 @@ func TestRegisterGatewayReportsEveryCounterAtItsCurrentValue(t *testing.T) {
 	rl := gwmetrics.NewRateLimiter(limiter{decision: gateway.RateDecision{Allowed: true}})
 	_, _ = rl.Allow(context.Background(), "rag-api")
 
+	tl := gwmetrics.NewTokenLimiter(tokenStub{decision: gateway.RateDecision{Allowed: true}})
+	_, _ = tl.Check(context.Background(), "rag-api")
+	_ = tl.Settle(context.Background(), "rag-api", 15)
+
 	sl := gwmetrics.NewSlotLimiter(slotStub{full: true, ceiling: 300})
 	_, _, _ = sl.TryAcquire("rag-api")
 
@@ -27,7 +31,7 @@ func TestRegisterGatewayReportsEveryCounterAtItsCurrentValue(t *testing.T) {
 	usage := gwmetrics.NewUsageRecorder(gateway.NopUsageRecorder{})
 	usage.RecordCompletion("rag-api", gateway.ModelProvider{}, gateway.Usage{PromptTokens: 10, CompletionTokens: 5}, 0, false)
 
-	if err := RegisterGateway(mp.Meter("test"), apps, rl, sl, pc, usage); err != nil {
+	if err := RegisterGateway(mp.Meter("test"), apps, rl, tl, sl, pc, usage); err != nil {
 		t.Fatalf("RegisterGateway: %v", err)
 	}
 
@@ -36,6 +40,8 @@ func TestRegisterGatewayReportsEveryCounterAtItsCurrentValue(t *testing.T) {
 		"gateway_key_resolved_total":         1,
 		"gateway_key_refused_total":          1,
 		"gateway_ratelimit_allowed_total":    1,
+		"gateway_token_budget_allowed_total": 1,
+		"gateway_tokens_debited_total":       15,
 		"concurrency_limit_rejections_total": 1,
 		"provider_attempts_total":            1,
 		"llm_prompt_tokens_total":            10,

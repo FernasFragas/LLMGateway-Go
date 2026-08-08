@@ -1,0 +1,31 @@
+# Dev-only provider credentials.
+#
+# In a real deployment these come from Vault via the Kubernetes auth method
+# (ADR-001, Question 7); this Secret is the kind: file path standing in for it
+# locally, and it is the same shape either way — one file per provider, each
+# holding exactly one key, so there is no format to parse.
+#
+# The values below are deliberately fake. That is useful, not a limitation:
+# a bogus key makes the provider answer 401, which is FaultRejected — the
+# gateway fails over per the app's policy and fires an out-of-band refresh
+# (decision #8). It is the cheapest way to exercise that path without
+# spending real tokens.
+#
+# Put a real key here to make completions actually work:
+#   kubectl -n llm create secret generic llm-gateway-provider-keys \
+#     --from-literal=openai=sk-... --from-literal=anthropic=sk-ant-... \
+#     --dry-run=client -o yaml | kubectl apply -f -
+#
+# ollama is absent on purpose — the in-cluster route needs no credential, and
+# that absence is how a keyless provider is declared.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: llm-gateway-provider-keys
+  namespace: llm
+  labels:
+    app: llm-gateway
+type: Opaque
+stringData:
+  openai: sk-dev-not-a-real-key
+  anthropic: sk-ant-dev-not-a-real-key
