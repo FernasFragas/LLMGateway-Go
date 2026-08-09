@@ -13,12 +13,12 @@ COVERPROFILE := coverage.out
 .DEFAULT_GOAL := help
 .PHONY: help verify build run \
         docker-build docker-run docker-stop \
-        test test-race cover lint-spec contract-test clean
+        test test-race test-integration cover lint-spec contract-test clean
 
 help:                         ## list the available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 	  | sort \
-	  | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
+	  | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-17s\033[0m %s\n", $$1, $$2}'
 
 # ─── build & run ────────────────────────────────────────────────────────────
 # In GoLand: run/debug ./cmd/gateway with program arguments
@@ -52,6 +52,14 @@ test:                         ## unit tests, including config.example.yaml valid
 test-race:                    ## unit tests under the race detector
 	go test -race ./...
 
+# The default suite runs the quota store against a fake that never executes
+# Lua, never expires a key, and never frames a reply the way a server does.
+# This target runs the same package against redis:7-alpine in a container, so
+# the scripts' atomicity and the hand-rolled RESP client are proved rather
+# than assumed. -count=1 because a cached PASS would defeat the point.
+test-integration:             ## quota-store tests against a real Redis (needs Docker)
+	go test -tags=integration -count=1 ./internal/redis
+
 cover: ## run tests with coverage → coverage.out + coverage.html, print total
 	go test ./... -covermode=atomic -coverprofile=$(COVERPROFILE)
 	go tool cover -html=$(COVERPROFILE) -o coverage.html
@@ -60,7 +68,7 @@ cover: ## run tests with coverage → coverage.out + coverage.html, print total
 
 # ─── spec & CI ──────────────────────────────────────────────────────────────
 
-verify: lint-spec test        ## everything CI runs on every push
+verify: lint-spec test test-integration  ## everything CI runs on every push (needs Docker)
 
 lint-spec:                    ## the spec is a fixture: built-in + gateway-* contract rules
 	npx --yes @stoplight/spectral-cli lint --ruleset .spectral.yaml --fail-severity=warn $(OPENAPI)

@@ -17,11 +17,21 @@ import (
 	"testing"
 )
 
+// integrationAddr is the container the integration suite starts; it is set
+// only when that suite's TestMain runs, so `-tags=integration -bench .`
+// reuses that server and the untagged path still needs REDIS_ADDR. Declared
+// here rather than beside TestMain because this is the file that consumes it,
+// and the tag must not be required to compile the benchmarks.
+var integrationAddr string
+
 func benchClient(b *testing.B) *Client {
 	b.Helper()
 	addr := os.Getenv("REDIS_ADDR")
 	if addr == "" {
-		b.Skip("set REDIS_ADDR to benchmark against a real Redis")
+		addr = integrationAddr
+	}
+	if addr == "" {
+		b.Skip("set REDIS_ADDR, or run with -tags=integration, to benchmark against a real Redis")
 	}
 	client, err := NewClient(addr, redisBenchPool)
 	if err != nil {

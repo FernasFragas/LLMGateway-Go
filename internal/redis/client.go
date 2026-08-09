@@ -5,12 +5,18 @@
 // open, and behind one store a single outage would trigger both policies with
 // fail-closed winning, putting the asymmetry out of reach.
 //
-// The client is hand-rolled against RESP because this module has one
-// dependency and the surface actually needed is small: send an array of bulk
-// strings, read one reply. A full client would bring pipelining, pub/sub,
-// cluster routing, and sentinel support that nothing here uses. The trade is
-// explicit — if this gateway ever needs cluster mode or pub/sub, take the
-// dependency rather than growing this file.
+// The client is hand-rolled against RESP because this module keeps its
+// runtime dependencies few and the surface actually needed is small: send an
+// array of bulk strings, read one reply. A full client would bring
+// pipelining, pub/sub, cluster routing, and sentinel support that nothing
+// here uses. The trade is explicit — if this gateway ever needs cluster mode
+// or pub/sub, take the dependency rather than growing this file.
+//
+// Hand-rolled buys a smaller binary, not a smaller obligation: this file owes
+// a real server the agreement a library would have brought with it. The
+// build-tagged suite in integration_test.go is where that debt is paid —
+// nil-vs-integer reply framing, script atomicity, and pooled reuse after an
+// error reply are all things the in-package fake cannot judge.
 package redis
 
 import (
