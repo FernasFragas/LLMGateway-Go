@@ -15,6 +15,8 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -100,6 +102,41 @@ func jwksServer(t *testing.T, body []byte) *httptest.Server {
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// jwksServerServing publishes docs one per request, repeating the last — an
+// endpoint whose answer changes between refreshes.
+func jwksServerServing(t *testing.T, docs ...[]byte) *httptest.Server {
+	t.Helper()
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		body := docs[0]
+		if len(docs) > 1 {
+			docs = docs[1:]
+		}
+		mu.Unlock()
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// oversized blows a JWKS document past the response cap with a filler member:
+// what a typo'd jwks_url pointed at some other service would look like —
+// well-formed JSON, far more of it than a keyset could ever be.
+func oversized(t *testing.T, doc []byte) []byte {
+	t.Helper()
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(doc, &obj); err != nil {
+		t.Fatalf("unmarshal JWKS: %v", err)
+	}
+	obj["padding"], _ = json.Marshal(strings.Repeat("a", maxJWKSBytes))
+	b, err := json.Marshal(obj)
+	if err != nil {
+		t.Fatalf("marshal padded JWKS: %v", err)
+	}
+	return b
 }
 
 // warmCache is a JWKSCache that has fetched the signer's keys once.

@@ -45,6 +45,22 @@ func TestFailedRefreshKeepsServingOldKeys(t *testing.T) {
 	}
 }
 
+func TestOversizedDocumentDoesNotEmptyTheCache(t *testing.T) {
+	s := newSigner(t)
+	doc := s.jwks()
+	cache := coldCache(t, jwksServerServing(t, doc, oversized(t, doc)).URL)
+	if err := cache.Refresh(context.Background()); err != nil {
+		t.Fatalf("first Refresh: %v", err)
+	}
+
+	if err := cache.Refresh(context.Background()); err == nil {
+		t.Error("a document past the size cap must be a refresh failure, not an unbounded read")
+	}
+	if _, ok := directory(t, cache).AppForKey(context.Background(), s.mint(t, nil)); !ok {
+		t.Error("stale keys must keep serving — an oversized answer is one more refresh failure")
+	}
+}
+
 func TestGarbageDocumentDoesNotEmptyTheCache(t *testing.T) {
 	s := newSigner(t)
 	srv := jwksServer(t, s.jwks())

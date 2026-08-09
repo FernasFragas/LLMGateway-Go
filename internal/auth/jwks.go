@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"sync"
@@ -14,6 +15,13 @@ import (
 )
 
 const defaultFetchTimeout = 10 * time.Second
+
+// maxJWKSBytes caps what a JWKS reply may cost in memory. A cluster's keyset
+// is a few kilobytes, so 1 MiB is generous headroom — the bound exists for
+// the misconfigured case, where a typo'd jwks_url points at some other
+// service and streams an unbounded body into the process. Same reasoning as
+// the provider adapters' cap, at the size this endpoint actually warrants.
+const maxJWKSBytes = 1 << 20
 
 // JWKSCache holds the cluster's ServiceAccount public keys, fetched from the
 // JWKS endpoint and cached in memory. The request path only ever reads the
@@ -72,7 +80,7 @@ func (c *JWKSCache) Refresh(ctx context.Context) error {
 	}
 
 	var wire jwksWire
-	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJWKSBytes)).Decode(&wire); err != nil {
 		return fmt.Errorf("auth: decode JWKS: %w", err)
 	}
 
