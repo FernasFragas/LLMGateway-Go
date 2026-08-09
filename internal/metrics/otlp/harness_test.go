@@ -10,11 +10,64 @@ import (
 	"context"
 	"testing"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/FernasFragas/LLMGateway-Go/internal/gateway"
+	gwmetrics "github.com/FernasFragas/LLMGateway-Go/internal/metrics/gateway"
 )
+
+// registerUsageOnly registers the full gateway instrument set with idle
+// decorators behind every port but the usage recorder, so a test about usage
+// states only the usage it recorded — the other counters observe nothing and
+// stay out of the assertions.
+func registerUsageOnly(t *testing.T, meter metric.Meter, usage *gwmetrics.UsageRecorder) {
+	t.Helper()
+
+	err := RegisterGateway(meter,
+		gwmetrics.NewAppDirectory(staticApps{}),
+		gwmetrics.NewRateLimiter(limiter{}),
+		gwmetrics.NewTokenLimiter(tokenStub{}),
+		gwmetrics.NewSlotLimiter(slotStub{}),
+		gwmetrics.NewProviderClient(provider{}),
+		usage,
+	)
+	if err != nil {
+		t.Fatalf("RegisterGateway: %v", err)
+	}
+}
+
+// collectedByAttr reads one instrument's data points keyed by a single string
+// attribute. collected() flattens attributes away, which is enough to prove a
+// counter moved but not that a label actually splits it — the question a
+// metric carrying a reason has to answer.
+func collectedByAttr(t *testing.T, reader *sdkmetric.ManualReader, name, attrKey string) map[string]int64 {
+	t.Helper()
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	out := make(map[string]int64)
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			data, ok := m.Data.(metricdata.Sum[int64])
+			if m.Name != name || !ok {
+				continue
+			}
+			for _, dp := range data.DataPoints {
+				if v, ok := dp.Attributes.Value(attribute.Key(attrKey)); ok {
+					out[v.Emit()] = dp.Value
+				}
+			}
+		}
+	}
+
+	return out
+}
 
 // collected runs one manual collection and returns every observed int64
 // sum value, keyed by instrument name — enough to assert a metric moved

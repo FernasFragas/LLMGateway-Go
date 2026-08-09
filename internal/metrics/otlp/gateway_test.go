@@ -59,3 +59,41 @@ func TestRegisterGatewayReportsEveryCounterAtItsCurrentValue(t *testing.T) {
 		t.Errorf("provider_failures_total = %v, want exactly one data point valued 1 (the timeout kind)", kindValues)
 	}
 }
+
+func TestTheUnobservedSpendEstimateIsReportedByReason(t *testing.T) {
+	// One series, split by a bounded reason: reconciliation sums it without
+	// having to remember two metric names, and an operator can still see
+	// which trade produced the tokens.
+	mp, reader := meterAndReader()
+
+	usage := gwmetrics.NewUsageRecorder(gateway.NopUsageRecorder{})
+	usage.RecordDoubleSpendRisk("rag-api", gateway.ModelProvider{}, 512)
+	usage.RecordClientDisconnect("rag-api", gateway.ModelProvider{}, 128)
+
+	registerUsageOnly(t, mp.Meter("test"), usage)
+
+	byReason := collectedByAttr(t, reader, "unobserved_spend_tokens_estimate", "reason")
+	if byReason["double_spend"] != 512 {
+		t.Errorf("reason=double_spend = %d, want 512", byReason["double_spend"])
+	}
+	if byReason["client_disconnect"] != 128 {
+		t.Errorf("reason=client_disconnect = %d, want 128", byReason["client_disconnect"])
+	}
+}
+
+func TestAReasonWithNoSpendIsNotReportedAtAll(t *testing.T) {
+	// Same rule the rejection and fault-kind callbacks follow: an untouched
+	// label is absent rather than a zero, so a dashboard shows the reasons
+	// that actually happened.
+	mp, reader := meterAndReader()
+
+	usage := gwmetrics.NewUsageRecorder(gateway.NopUsageRecorder{})
+	usage.RecordDoubleSpendRisk("rag-api", gateway.ModelProvider{}, 512)
+
+	registerUsageOnly(t, mp.Meter("test"), usage)
+
+	byReason := collectedByAttr(t, reader, "unobserved_spend_tokens_estimate", "reason")
+	if _, present := byReason["client_disconnect"]; present {
+		t.Errorf("reason=client_disconnect reported %d with no disconnect recorded", byReason["client_disconnect"])
+	}
+}

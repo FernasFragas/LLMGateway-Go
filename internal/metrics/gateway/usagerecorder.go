@@ -25,8 +25,15 @@ type UsageRecorder struct {
 	rejections atomic.Int64
 
 	rateLimiterFailOpens atomic.Int64
-	doubleSpendRisks     atomic.Int64
-	clientDisconnects    atomic.Int64
+
+	// Each unobservable-spend event is counted twice over: how often it
+	// happened, and the upper-bound tokens it may have cost. The pair is the
+	// point — the count alone says an incident occurred, and only the token
+	// sum says whether it mattered against a real bill (decision #6).
+	doubleSpendRisks       atomic.Int64
+	doubleSpendTokens      atomic.Int64
+	clientDisconnects      atomic.Int64
+	clientDisconnectTokens atomic.Int64
 
 	mu               sync.Mutex
 	rejectionsByCode map[gateway.ErrorCode]int64
@@ -66,14 +73,26 @@ func (r *UsageRecorder) RecordRateLimiterFailOpen(app string) {
 
 func (r *UsageRecorder) RecordDoubleSpendRisk(app string, mp gateway.ModelProvider, estimatedTokens int) {
 	r.doubleSpendRisks.Add(1)
+	addEstimate(&r.doubleSpendTokens, estimatedTokens)
 
 	r.next.RecordDoubleSpendRisk(app, mp, estimatedTokens)
 }
 
 func (r *UsageRecorder) RecordClientDisconnect(app string, mp gateway.ModelProvider, estimatedTokens int) {
 	r.clientDisconnects.Add(1)
+	addEstimate(&r.clientDisconnectTokens, estimatedTokens)
 
 	r.next.RecordClientDisconnect(app, mp, estimatedTokens)
+}
+
+// addEstimate accumulates an upper-bound token estimate, ignoring anything
+// that isn't a positive number. These feed a monotonic counter, and a
+// negative would run it backwards — an exporter's cardinal sin, and one no
+// caller could see from the metric afterwards.
+func addEstimate(total *atomic.Int64, tokens int) {
+	if tokens > 0 {
+		total.Add(int64(tokens))
+	}
 }
 
 // Completions reports how many requests this instance recorded as served.
@@ -110,5 +129,14 @@ func (r *UsageRecorder) RateLimiterFailOpens() int64 { return r.rateLimiterFailO
 // abandoned attempt.
 func (r *UsageRecorder) DoubleSpendRisks() int64 { return r.doubleSpendRisks.Load() }
 
+// DoubleSpendTokens reports the upper-bound tokens those failovers may have
+// been billed for: each attempt's parsed usage when the fault carried any,
+// otherwise the request's own max_tokens.
+func (r *UsageRecorder) DoubleSpendTokens() int64 { return r.doubleSpendTokens.Load() }
+
 // ClientDisconnects reports how many requests a caller abandoned mid-flight.
 func (r *UsageRecorder) ClientDisconnects() int64 { return r.clientDisconnects.Load() }
+
+// ClientDisconnectTokens reports the upper-bound tokens those abandoned
+// requests may still have been billed for.
+func (r *UsageRecorder) ClientDisconnectTokens() int64 { return r.clientDisconnectTokens.Load() }

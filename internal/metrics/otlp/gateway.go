@@ -275,5 +275,31 @@ func RegisterGateway(meter metric.Meter, apps *gwmetrics.AppDirectory, rl *gwmet
 		return err
 	}
 
+	// The token companion to the two counters above. They report that spend
+	// went unobserved; only this reports how much, which is the term the
+	// brief's billing-reconciliation criterion subtracts — without it that
+	// criterion has no denominator and cannot be evaluated at all.
+	//
+	// One series with a bounded reason rather than two metrics: the
+	// reconciliation query wants the total and should not have to remember
+	// both names, while an operator reading an incident wants them apart,
+	// because they are different decisions — a disconnect is spend the caller
+	// abandoned (decision #3), a double-spend risk is spend this gateway
+	// chose to risk to buy availability (decision #6).
+	if _, err := meter.Int64ObservableCounter("unobserved_spend_tokens_estimate",
+		metric.WithDescription("upper-bound tokens a provider may have billed that the gateway never received, by reason"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			if n := usage.DoubleSpendTokens(); n > 0 {
+				o.Observe(n, metric.WithAttributes(attribute.String("reason", "double_spend")))
+			}
+			if n := usage.ClientDisconnectTokens(); n > 0 {
+				o.Observe(n, metric.WithAttributes(attribute.String("reason", "client_disconnect")))
+			}
+			return nil
+		}),
+	); err != nil {
+		return err
+	}
+
 	return nil
 }
