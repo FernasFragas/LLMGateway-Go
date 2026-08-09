@@ -69,8 +69,15 @@ data:
         failover_policy:
           allowlist: [gpt-4.1, claude-sonnet-4]   # every entry must exist in routes
 
+    # The quota store both rate currencies share — quotas + breaker state
+    # only, never a credential. `deploy/` ships no Redis: it is external
+    # infrastructure, and this key is the whole integration (see
+    # deploy/README.md). The address below is the one deploy/dev/redis.yaml
+    # creates; managed Redis means changing this line and nothing else.
+    # Unreachable is survivable — limits go unenforced, requests keep flowing,
+    # and both limiters say so in the log.
     redis:
-      addr: redis.llm.svc.cluster.local:6379      # quotas + breaker state only (fail open)
+      addr: redis.llm.svc.cluster.local:6379
 
     # Provider keys only — app identity is the SA token. One source per
     # provider; ollama is absent because the in-cluster route needs no

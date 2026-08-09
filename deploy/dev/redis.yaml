@@ -7,7 +7,9 @@
 #
 # Single replica, no persistence, no auth: quota counters are disposable by
 # design (fixed windows with a TTL measured in seconds), and losing them costs
-# one unenforced window. Nothing here is a production Redis.
+# one unenforced window. Nothing here is a production Redis — `deploy/` ships
+# none on purpose (deploy/README.md), and this is what a laptop puts at the
+# `redis.addr` a real cluster points at managed infrastructure.
 apiVersion: v1
 kind: Service
 metadata:

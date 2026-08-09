@@ -1,5 +1,10 @@
-# The unit you can delete to reset the whole experiment. Everything below
-# lives here.
+# Everything the gateway runs as lives here — but deleting this namespace is
+# NOT a full reset: `rbac.yaml` is a cluster-scoped ClusterRoleBinding and
+# survives it. Reset with `kubectl delete -f deploy/ -f deploy/dev/`.
+#
+# The `00-` prefix is load-bearing: `kubectl apply -f deploy/` applies files in
+# filename order and resolves no dependencies, so this must sort first or the
+# manifests that target `llm` fail with `namespaces "llm" not found`.
 apiVersion: v1
 kind: Namespace
 metadata:

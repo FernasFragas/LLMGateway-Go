@@ -3,6 +3,17 @@
 # binding the built-in system:service-account-issuer-discovery ClusterRole to
 # the gateway's SA is what lets its token read them. Without this, the code
 # still gets 403 — permission is granted in YAML, never in Go.
+#
+# This binding is cluster-scoped and cannot be otherwise: the ClusterRole
+# grants only `nonResourceURLs`, and Kubernetes grants those exclusively
+# through a ClusterRoleBinding — a RoleBinding pointing at the same ClusterRole
+# silently drops those rules and you are back to 403.
+#
+# Consequence: it outlives `kubectl delete namespace llm`. Reset with
+# `kubectl delete -f deploy/ -f deploy/dev/`, which removes it too. Deleting
+# the namespace alone leaves a binding that quietly starts working again when
+# the namespace and SA are recreated under the same names — so the RBAC step
+# never actually gets re-tested.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
