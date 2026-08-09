@@ -42,10 +42,22 @@ type JWKS struct {
 
 // AppLimits are one app's declared currencies: request rate, token rate,
 // and in-flight slots.
+//
+// Zero in any field means that currency is unlimited for this app — a caller
+// pays for what it configures, not for what it omits, matching
+// GlobalMaxInFlight's own zero-means-unenforced convention. An omitted
+// limits: block leaves all three zero, so it declares an app with no limits
+// at all rather than an app that may make no requests. Load never fills a
+// zero in: the limiters read the convention directly, and an unmetered
+// currency costs the request path nothing — no Redis round trip, no counter.
+//
+// Slots are the one currency with a second bound: an app with no ceiling of
+// its own still counts against GlobalMaxInFlight, which exists to protect
+// this process's memory rather than to isolate callers from each other.
 type AppLimits struct {
-	RPS             int
-	TokensPerMinute int
-	MaxInFlight     int
+	RPS             int // requests per second; 0: unlimited
+	TokensPerMinute int // prompt + completion tokens per 60s window; 0: unlimited
+	MaxInFlight     int // concurrent requests; 0: no ceiling of its own
 }
 
 // Redis locates the quota and breaker state store (fail open when down).

@@ -208,6 +208,25 @@ apps:
 `, "exceeds global_max_in_flight")
 }
 
+func TestOmittedLimitsAreUnlimitedNotForbidden(t *testing.T) {
+	// Zero is the file's way of not pricing a currency, and the global
+	// ceiling is no reason to invent a per-app one underneath it.
+	cfg, err := Load(write(t, `
+server: {global_max_in_flight: 100}
+apps:
+  silent: {subject: s1}
+  empty: {subject: s2, limits: {}}
+`))
+	if err != nil {
+		t.Fatalf("an app that declares no limits must load — omitting a currency is not a mistake: %v", err)
+	}
+	for _, app := range []string{"silent", "empty"} {
+		if cfg.Limits[app] != (AppLimits{}) {
+			t.Errorf("%s limits = %+v, want all zero — Load must never inject a ceiling the file did not declare", app, cfg.Limits[app])
+		}
+	}
+}
+
 func TestIncompleteRouteIsRejected(t *testing.T) {
 	wantBootFailure(t, `routes: [{model: gpt-4.1, provider: openai}]`, "routes[0]")
 }

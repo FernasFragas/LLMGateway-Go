@@ -36,7 +36,16 @@ routes:
 failover_order: [openai, anthropic, ollama]
 
 # Per-app contract. Each app declares THREE limits (rate, tokens, slots)
-# and ONE failover policy. Policy forms:
+# and ONE failover policy.
+#
+# Zero in any limit — or an omitted `limits:` block — means that currency is
+# unlimited for this app, never "this app may make zero requests": a caller
+# pays for what it configures, not for what it omits, the same convention
+# `global_max_in_flight: 0` already follows. An app with no `max_in_flight`
+# of its own still counts against the global cap, which bounds process
+# memory rather than isolating callers.
+#
+# Policy forms:
 #   failover_policy: any                          — delegate to failover_order
 #   failover_policy: same-model                   — route failover only (default)
 #   failover_policy: { allowlist: [m1, m2] }      — app-named substitutes, in order
