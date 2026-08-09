@@ -127,3 +127,7 @@ graph LR
 The reasoning behind the failure modes, the capacity math, and the decisions
 they commit to lives in
 [`docs/design/architecture-brief.md`](docs/design/architecture-brief.md).
+
+What a caller sends and may rely on — every field, each response case, and the
+full error catalogue — is [`docs/api-requests.md`](docs/api-requests.md); the
+schemas underneath it are [`openapi.yaml`](openapi.yaml).
