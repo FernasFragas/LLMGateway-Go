@@ -33,7 +33,7 @@ func benchClient(b *testing.B) *Client {
 	if addr == "" {
 		b.Skip("set REDIS_ADDR, or run with -tags=integration, to benchmark against a real Redis")
 	}
-	client, err := NewClient(addr, redisBenchPool)
+	client, err := NewClient(addr, redisBenchPool, Options{})
 	if err != nil {
 		b.Fatalf("NewClient: %v", err)
 	}

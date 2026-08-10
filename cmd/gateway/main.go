@@ -10,11 +10,15 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
+	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -75,7 +79,7 @@ func newServer(cfg api.Config, core api.ChatService, checker *health.Checker,
 // and the unknown-caller log wrapped around the directory. The returned
 // JWKSCache is handed to auth.KeepFresh — the request path itself never touches
 // the network.
-func newAppDirectory(cfg config.Config, checker *health.Checker, log *slog.Logger) (gateway.AppDirectory, *auth.JWKSCache, *gwmetrics.AppDirectory, error) {
+func newAppDirectory(ctx context.Context, cfg config.Config, checker *health.Checker, log *slog.Logger) (gateway.AppDirectory, *auth.JWKSCache, *gwmetrics.AppDirectory, error) {
 	// In a pod this client trusts the cluster CA and carries the gateway's own
 	// SA token to the RBAC-gated JWKS endpoint; outside one it is a plain
 	// default client, so local dev stays unconfigured. The environment, not a
@@ -83,6 +87,24 @@ func newAppDirectory(cfg config.Config, checker *health.Checker, log *slog.Logge
 	client, err := auth.NewFetchClient(auth.DefaultServiceAccountDir)
 	if err != nil {
 		return nil, nil, nil, err
+	}
+
+	// Ask the cluster whether the configured issuer is really its own. The
+	// two outcomes are not the same failure: a mismatch is certain and fatal
+	// — serving on it means refusing every caller — while an unreachable
+	// document only leaves the question open, and the JWKS fetch behind it is
+	// failing too, so readiness already holds traffic off this pod. Crashing
+	// on that would turn an apiserver blip into a crash loop.
+	if err := auth.VerifyIssuer(ctx, client, cfg.JWKS.URL, cfg.Auth.Issuer); err != nil {
+		var mismatch *auth.IssuerMismatch
+		if errors.As(err, &mismatch) {
+			log.Error("configured issuer is not this cluster's",
+				"configured", mismatch.Configured, "cluster", mismatch.Cluster)
+
+			return nil, nil, nil, err
+		}
+		log.Warn("could not verify the issuer against the cluster; a wrong issuer will surface as 401 for every caller",
+			"error", err)
 	}
 
 	keys, err := auth.NewJWKSCache(cfg.JWKS.URL, client)
@@ -139,7 +161,7 @@ func run() error {
 
 	checker := health.NewChecker()
 
-	dir, keys, dirMetrics, err := newAppDirectory(cfg, checker, log)
+	dir, keys, dirMetrics, err := newAppDirectory(ctx, cfg, checker, log)
 	if err != nil {
 		log.Error("failed to build app directory", "error", err)
 		return err
@@ -172,8 +194,8 @@ func run() error {
 	// of its own: metrics wraps it instead, forwarding every call through.
 	rateLimiterMetrics := gwmetrics.NewRateLimiter(quotas)
 	tokenLimiterMetrics := gwmetrics.NewTokenLimiter(budgets)
-	slotLimiterMetrics := gwmetrics.NewSlotLimiter(slotting)
-	usageMetrics := gwmetrics.NewUsageRecorder(gwlogs.NewUsageRecorder(log))
+	slotLimiterMetrics := gwmetrics.NewSlotLimiter(slotting, appNames(cfg))
+	usageMetrics := gwmetrics.NewUsageRecorder(gwlogs.NewUsageRecorder(log), appNames(cfg))
 
 	core, err := gateway.New(cfg.Gateway, gateway.Deps{
 		Apps:        dir,
@@ -199,7 +221,7 @@ func run() error {
 	}
 	requestMetrics, panicMetrics := metrics.NewRequestMetrics(), metrics.NewPanicCounter()
 	if err := registerMetrics(otlpProvider, dirMetrics, rateLimiterMetrics, tokenLimiterMetrics, slotLimiterMetrics, providerMetrics, usageMetrics,
-		refreshMetrics, triggers, providerKeys, slotting, cfg, requestMetrics, panicMetrics); err != nil {
+		refreshMetrics, triggers, providerKeys, keys, slotting, cfg, requestMetrics, panicMetrics); err != nil {
 		log.Error("failed to register metrics instruments", "error", err)
 		return err
 	}
@@ -261,14 +283,21 @@ func run() error {
 func registerMetrics(p *otlp.Provider, dir *gwmetrics.AppDirectory, rl *gwmetrics.RateLimiter, tl *gwmetrics.TokenLimiter,
 	sl *gwmetrics.SlotLimiter, pc *gwmetrics.ProviderClient, usage *gwmetrics.UsageRecorder,
 	refresher *keysmetrics.Refresher, triggers *keysmetrics.TriggerCounter,
-	keys *providerkeys.Cache, slotting *slots.Limiter, cfg config.Config, reqs *metrics.RequestMetrics, panics *metrics.PanicCounter,
+	keys *providerkeys.Cache, jwks *auth.JWKSCache, slotting *slots.Limiter, cfg config.Config,
+	reqs *metrics.RequestMetrics, panics *metrics.PanicCounter,
 ) error {
 	meter := p.Meter()
 
 	if err := otlp.RegisterGateway(meter, dir, rl, tl, sl, pc, usage); err != nil {
 		return err
 	}
+	// Both staleness gauges register here, side by side on purpose: they are
+	// the two halves of one argument, and shipping only one is what left the
+	// signing keys' own staleness invisible.
 	if err := otlp.RegisterProviderKeys(meter, refresher, triggers, keys, keys.Providers()); err != nil {
+		return err
+	}
+	if err := otlp.RegisterAuth(meter, jwks); err != nil {
 		return err
 	}
 
@@ -360,8 +389,78 @@ func newProviderClient(ctx context.Context, cfg config.Config, checker *health.C
 
 	// Metrics innermost, logging outermost — the same seam every other
 	// gateway port uses.
-	providerMetrics := gwmetrics.NewProviderClient(router)
+	providerMetrics := gwmetrics.NewProviderClient(router, providerNames(cfg))
 	return gwlogs.NewProviderClient(providerMetrics, log), providerMetrics, refreshMetrics, triggers, keys, nil
+}
+
+// redisOptions reads the quota store's credentials off disk into the values
+// the client needs. Both are read once, here, rather than refreshed the way
+// provider keys are: rotating either is a restart, which is the honest cost
+// of a connection whose security is established once and then pooled.
+//
+// A missing or unreadable file is a boot failure, deliberately. Quotas fail
+// open, so a client built with an empty password would connect, be refused
+// by the server, and leave every limit silently unenforced — the one failure
+// this ticket exists to make impossible. Failing at boot is the only place
+// this mistake is loud.
+func redisOptions(cfg config.Redis) (redis.Options, error) {
+	opts := redis.Options{TLS: cfg.TLS}
+
+	if cfg.PasswordPath != "" {
+		password, err := os.ReadFile(cfg.PasswordPath)
+		if err != nil {
+			return redis.Options{}, fmt.Errorf("read redis password: %w", err)
+		}
+		// Trimmed for the same reason provider keys are: an editor's trailing
+		// newline is not part of the credential, and AUTH would refuse it.
+		opts.Password = strings.TrimSpace(string(password))
+	}
+
+	if cfg.CAPath != "" {
+		pem, err := os.ReadFile(cfg.CAPath)
+		if err != nil {
+			return redis.Options{}, fmt.Errorf("read redis CA bundle: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return redis.Options{}, fmt.Errorf("redis CA bundle %s holds no certificate", cfg.CAPath)
+		}
+		opts.RootCAs = pool
+	}
+
+	return opts, nil
+}
+
+// appNames and providerNames are the two closed sets the metrics decorators
+// carry as dimensions. Both come from config, read once at boot, which is
+// exactly what bounds the exported series count — a value that never appears
+// here can never become a label, so no request can mint one.
+//
+// They are derived rather than configured separately: an app the directory
+// cannot resolve is unauthorized, and a provider absent from the routes list
+// is unreachable, so neither could produce a metric that a second list would
+// have to stay in step with.
+func appNames(cfg config.Config) []string {
+	names := make([]string, 0, len(cfg.Auth.Apps))
+	for _, app := range cfg.Auth.Apps {
+		names = append(names, app.Name)
+	}
+
+	return names
+}
+
+func providerNames(cfg config.Config) []string {
+	seen := make(map[string]struct{}, len(cfg.Gateway.ModelProviders))
+	names := make([]string, 0, len(cfg.Gateway.ModelProviders))
+	for _, mp := range cfg.Gateway.ModelProviders {
+		if _, dup := seen[mp.Provider]; dup {
+			continue
+		}
+		seen[mp.Provider] = struct{}{}
+		names = append(names, mp.Provider)
+	}
+
+	return names
 }
 
 // newFetcher picks how credentials are read. Both kinds ship; an unknown kind
@@ -401,9 +500,14 @@ func newLimiters(cfg config.Config) (*redis.Limiter, *redis.TokenLimiter, *slots
 		ceilings[app] = limits.MaxInFlight
 	}
 
+	opts, err := redisOptions(cfg.Redis)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
 	// Both rate currencies share one client: they are the same store, the same
 	// fail-open policy, and the same key convention — only the window differs.
-	client, err := redis.NewClient(cfg.Redis.Addr, redisPoolSize)
+	client, err := redis.NewClient(cfg.Redis.Addr, redisPoolSize, opts)
 	if err != nil {
 		return nil, nil, nil, err
 	}

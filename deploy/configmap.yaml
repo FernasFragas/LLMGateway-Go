@@ -22,6 +22,18 @@ data:
 
     # Caller identity: bound ServiceAccount tokens verified locally against the
     # cluster JWKS (fail static — no TokenReview on the request path).
+    #
+    # issuer below is DOCKER DESKTOP'S. Every managed cluster issues tokens
+    # under an OIDC URL instead, and the claim is matched exactly — so on
+    # EKS/GKE/AKS this value refuses every caller. Read the real one with:
+    #
+    #   kubectl get --raw /.well-known/openid-configuration | jq -r .issuer
+    #
+    # The gateway now checks this at startup against that same document and
+    # refuses to boot on a mismatch, naming both values. jwks_url does NOT
+    # need to match the jwks_uri that document advertises: it points at the
+    # apiserver's own address, while this is the in-cluster service path, and
+    # them differing is the normal setup.
     auth:
       issuer: https://kubernetes.default.svc.cluster.local
       audience: llm-gateway
@@ -76,8 +88,16 @@ data:
     # creates; managed Redis means changing this line and nothing else.
     # Unreachable is survivable — limits go unenforced, requests keep flowing,
     # and both limiters say so in the log.
+    #
+    # tls and password_path are absent because this address is an in-cluster
+    # Redis on the pod network. A managed cache needs them — mount the CA and
+    # the password as files (never values here; this ConfigMap is in git) and
+    # set all three keys together.
     redis:
       addr: redis.llm.svc.cluster.local:6379
+      # tls: true
+      # ca_path: /etc/gateway/redis/ca.pem
+      # password_path: /etc/gateway/redis/password
 
     # Provider keys only — app identity is the SA token. One source per
     # provider; ollama is absent because the in-cluster route needs no

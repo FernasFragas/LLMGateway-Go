@@ -22,6 +22,8 @@ package redis
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -33,11 +35,35 @@ import (
 // caller's context, so this only covers the case where no deadline was set.
 const dialTimeout = 2 * time.Second
 
+// Options are the connection's security settings — everything that must be
+// established before a pooled connection is usable, and nothing that varies
+// per command. A zero Options is a plaintext, unauthenticated connection:
+// correct for an in-cluster Redis on the pod network, and the reason those
+// two fields have to be set deliberately rather than defaulted on.
+type Options struct {
+	// TLS wraps the connection once it is dialed. Required by managed caches
+	// with encryption in transit enabled.
+	TLS bool
+	// RootCAs verifies the server's certificate; nil means the host's own
+	// trust store. A managed cache fronted by a private CA needs its bundle
+	// here, or the handshake fails with an unknown authority.
+	RootCAs *x509.CertPool
+	// Password is sent as AUTH on each new connection. Empty means the
+	// server has no password — sending AUTH to a server without one is an
+	// error, so this is not a value that can be defaulted to something safe.
+	Password string
+}
+
 // Client is a minimal RESP client over a small connection pool. The zero
 // value is not usable; call NewClient.
 type Client struct {
 	addr string
-	pool chan *conn
+	opts Options
+	// serverName is the host half of addr, used to verify the certificate.
+	// Derived once rather than per dial, and separate from addr because a
+	// certificate names a host, not a host:port.
+	serverName string
+	pool       chan *conn
 }
 
 type conn struct {
@@ -48,8 +74,10 @@ type conn struct {
 // NewClient prepares a client for addr with at most size pooled connections.
 // Nothing is dialed here: a quota store that is down must not stop the
 // gateway from booting, because rate limiting fails open and auth does not
-// depend on it.
-func NewClient(addr string, size int) (*Client, error) {
+// depend on it. That includes a wrong password or an untrusted certificate —
+// both surface as connection errors on the first request, which the limiters
+// report and the core fails open on, exactly like an unreachable host.
+func NewClient(addr string, size int, opts Options) (*Client, error) {
 	if addr == "" {
 		return nil, errors.New("redis: address is required")
 	}
@@ -57,7 +85,12 @@ func NewClient(addr string, size int) (*Client, error) {
 		size = 4
 	}
 
-	return &Client{addr: addr, pool: make(chan *conn, size)}, nil
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("redis: address %q must be host:port: %w", addr, err)
+	}
+
+	return &Client{addr: addr, opts: opts, serverName: host, pool: make(chan *conn, size)}, nil
 }
 
 // Int sends one command and reads an integer reply — the only reply shape the
@@ -104,13 +137,71 @@ func (c *Client) take(ctx context.Context) (*conn, error) {
 	default:
 	}
 
+	return c.dial(ctx)
+}
+
+// dial establishes one connection all the way to usable: TCP, then the TLS
+// handshake, then AUTH. Every step is bounded by one deadline — a hung
+// handshake or an unanswered AUTH would otherwise hold a pool slot with no
+// command outstanding to time it out, which is a stall no caller can see.
+//
+// A connection that fails any step is closed rather than returned. Half a
+// handshake or an unanswered AUTH leaves bytes nobody will read, and a
+// connection carrying those would corrupt the first real command placed on
+// it.
+func (c *Client) dial(ctx context.Context) (*conn, error) {
 	dialer := net.Dialer{Timeout: dialTimeout}
 	raw, err := dialer.DialContext(ctx, "tcp", c.addr)
 	if err != nil {
 		return nil, fmt.Errorf("redis: dial %s: %w", c.addr, err)
 	}
 
-	return &conn{Conn: raw, r: bufio.NewReader(raw)}, nil
+	if err := raw.SetDeadline(setupDeadline(ctx)); err != nil {
+		_ = raw.Close()
+		return nil, fmt.Errorf("redis: set deadline: %w", err)
+	}
+
+	if c.opts.TLS {
+		tlsConn := tls.Client(raw, &tls.Config{
+			ServerName: c.serverName,
+			RootCAs:    c.opts.RootCAs,
+			MinVersion: tls.VersionTLS12,
+		})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = raw.Close()
+			return nil, fmt.Errorf("redis: tls handshake %s: %w", c.addr, err)
+		}
+		raw = tlsConn
+	}
+
+	cn := &conn{Conn: raw, r: bufio.NewReader(raw)}
+
+	if c.opts.Password != "" {
+		if err := cn.auth(c.opts.Password); err != nil {
+			_ = cn.Close()
+			return nil, err
+		}
+	}
+
+	// Clear the setup deadline: Int sets its own per command, and leaving
+	// this one would expire a pooled connection mid-request later.
+	if err := cn.SetDeadline(time.Time{}); err != nil {
+		_ = cn.Close()
+		return nil, fmt.Errorf("redis: clear deadline: %w", err)
+	}
+
+	return cn, nil
+}
+
+// setupDeadline bounds the handshake and AUTH by whichever is sooner: the
+// caller's own deadline, or the same budget a dial gets.
+func setupDeadline(ctx context.Context) time.Time {
+	deadline := time.Now().Add(dialTimeout)
+	if caller, ok := ctx.Deadline(); ok && caller.Before(deadline) {
+		return caller
+	}
+
+	return deadline
 }
 
 func (c *Client) put(cn *conn) {
@@ -121,9 +212,34 @@ func (c *Client) put(cn *conn) {
 	}
 }
 
+// auth authenticates this connection before any command runs on it. AUTH is
+// the one command here that answers with a simple string rather than an
+// integer, which is why readStatus exists at all — the limiters need no
+// other reply shape.
+//
+// A refusal travels with the server's own message: WRONGPASS and "Client
+// sent AUTH, but no password is set" are different operator mistakes, and
+// collapsing them into "auth failed" would hide which one was made.
+func (cn *conn) auth(password string) error {
+	if err := cn.write([]string{"AUTH", password}); err != nil {
+		return err
+	}
+
+	return cn.readStatus()
+}
+
 // roundTrip writes one command as a RESP array of bulk strings and reads the
 // integer reply.
 func (cn *conn) roundTrip(args []string) (int64, error) {
+	if err := cn.write(args); err != nil {
+		return 0, err
+	}
+
+	return cn.readInt()
+}
+
+// write encodes one command as a RESP array of bulk strings and sends it.
+func (cn *conn) write(args []string) error {
 	var req []byte
 	req = append(req, '*')
 	req = strconv.AppendInt(req, int64(len(args)), 10)
@@ -137,10 +253,31 @@ func (cn *conn) roundTrip(args []string) (int64, error) {
 	}
 
 	if _, err := cn.Write(req); err != nil {
-		return 0, fmt.Errorf("redis: write: %w", err)
+		return fmt.Errorf("redis: write: %w", err)
 	}
 
-	return cn.readInt()
+	return nil
+}
+
+// readStatus reads one simple-string reply, translating the error form into
+// a Go error the same way readInt does.
+func (cn *conn) readStatus() error {
+	line, err := cn.readLine()
+	if err != nil {
+		return err
+	}
+	if len(line) == 0 {
+		return errors.New("redis: empty reply")
+	}
+
+	switch line[0] {
+	case '+':
+		return nil
+	case '-':
+		return fmt.Errorf("redis: %s", line[1:])
+	default:
+		return fmt.Errorf("redis: unexpected reply %q", line)
+	}
 }
 
 // readInt reads one reply, accepting the integer form and translating the

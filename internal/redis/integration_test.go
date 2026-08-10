@@ -87,7 +87,7 @@ func resolveAddr(ctx context.Context, container *tcredis.RedisContainer) error {
 
 func realClient(t *testing.T) *Client {
 	t.Helper()
-	client, err := NewClient(storeAddr, 2)
+	client, err := NewClient(storeAddr, 2, Options{})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -303,4 +303,91 @@ func TestPooledConnectionsSurviveASequenceOfCalls(t *testing.T) {
 	if used := ttlOf(t, client, "llmgw:rps:"+app+":4000"); used <= 0 {
 		t.Errorf("TTL = %d after 25 calls, want the key still alive with its original lifetime", used)
 	}
+}
+
+// ─── connection setup against a real server ─────────────────────────────────
+
+func TestARealPasswordProtectedServerRefusesAnUnauthenticatedClient(t *testing.T) {
+	// The fake models this exchange; only a real server decides for itself
+	// what NOAUTH and WRONGPASS look like on the wire, and this client has no
+	// library standing between it and those bytes.
+	addr := protectedStore(t, "s3cret")
+
+	unauthenticated := NewLimiter(clientAt(t, addr, Options{}), map[string]int{"rag-api": 10})
+	_, err := unauthenticated.Allow(context.Background(), "rag-api")
+	if err == nil || !strings.Contains(err.Error(), "NOAUTH") {
+		t.Errorf("error = %v, want the server's own NOAUTH — a store that refuses every command must be reported, not read as an empty quota", err)
+	}
+
+	wrong := NewLimiter(clientAt(t, addr, Options{Password: "nope"}), map[string]int{"rag-api": 10})
+	if _, err := wrong.Allow(context.Background(), "rag-api"); err == nil || !strings.Contains(err.Error(), "WRONGPASS") {
+		t.Errorf("error = %v, want WRONGPASS", err)
+	}
+
+	authenticated := NewLimiter(clientAt(t, addr, Options{Password: "s3cret"}), map[string]int{"rag-api": 10})
+	if d, err := authenticated.Allow(context.Background(), "rag-api"); err != nil || !d.Allowed {
+		t.Errorf("Allow with the right password: %+v %v", d, err)
+	}
+}
+
+func TestAuthHoldsAcrossPooledReuseAndAfterAnErrorReply(t *testing.T) {
+	// AUTH is per connection, so a connection dropped after an error has to
+	// authenticate again on the replacement dial. If it did not, the failure
+	// would appear one command later, on an unrelated request.
+	addr := protectedStore(t, "s3cret")
+	client := clientAt(t, addr, Options{Password: "s3cret"})
+	l := NewLimiter(client, map[string]int{"rag-api": 1 << 20})
+
+	for i := range 5 {
+		if _, err := l.Allow(context.Background(), "rag-api"); err != nil {
+			t.Fatalf("pooled call %d: %v", i+1, err)
+		}
+	}
+
+	if _, err := client.Int(context.Background(), "EVAL", "this is not lua", "1", "k"); err == nil {
+		t.Fatal("a malformed script was accepted")
+	}
+
+	if _, err := l.Allow(context.Background(), "rag-api"); err != nil {
+		t.Errorf("the redial after an error reply did not re-authenticate: %v", err)
+	}
+}
+
+// protectedStore starts a second container running with --requirepass and
+// returns its address. It is separate from the suite's shared server because
+// requiring a password is a property of the server, not of a connection.
+func protectedStore(t *testing.T, password string) string {
+	t.Helper()
+	ctx := context.Background()
+
+	container, err := tcredis.Run(ctx, redisImage,
+		testcontainers.WithCmdArgs("--requirepass", password),
+	)
+	if err != nil {
+		t.Fatalf("start protected %s: %v", redisImage, err)
+	}
+	testcontainers.CleanupContainer(t, container)
+
+	uri, err := container.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("connection string: %v", err)
+	}
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		t.Fatalf("parse %q: %v", uri, err)
+	}
+
+	return parsed.Host
+}
+
+// clientAt builds a client for addr under opts.
+func clientAt(t *testing.T, addr string, opts Options) *Client {
+	t.Helper()
+	client, err := NewClient(addr, 2, opts)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	return client
 }

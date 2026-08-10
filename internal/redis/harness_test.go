@@ -6,12 +6,19 @@ package redis
 
 import (
 	"bufio"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
+	"math/big"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // redisServer speaks just enough RESP to answer both limiters: it parses the
@@ -20,6 +27,13 @@ import (
 type redisServer struct {
 	addr     string
 	replyErr string
+
+	// requirePass models a server started with --requirepass: every command
+	// before a successful AUTH is refused with NOAUTH, which is what a
+	// client that skips the handshake actually meets.
+	requirePass string
+	// roots verifies this server's certificate when it speaks TLS.
+	roots *x509.CertPool
 
 	mu     sync.Mutex
 	counts map[string]int64
@@ -58,7 +72,21 @@ func (s *redisServer) spend(key string) int64 {
 	return s.counts[key]
 }
 
+// serverOptions selects which connection-setup behavior the fake models.
+// The zero value is the plaintext, password-less server every existing test
+// builds against.
+type serverOptions struct {
+	requirePass string
+	tls         bool
+}
+
 func fakeRedis(t *testing.T) *redisServer {
+	t.Helper()
+
+	return fakeRedisWith(t, serverOptions{})
+}
+
+func fakeRedisWith(t *testing.T, opts serverOptions) *redisServer {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -66,7 +94,13 @@ func fakeRedis(t *testing.T) *redisServer {
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 
-	s := &redisServer{addr: ln.Addr().String(), counts: map[string]int64{}}
+	s := &redisServer{addr: ln.Addr().String(), counts: map[string]int64{}, requirePass: opts.requirePass}
+
+	if opts.tls {
+		cert, roots := selfSigned(t)
+		s.roots = roots
+		ln = tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	}
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -86,11 +120,24 @@ func fakeRedis(t *testing.T) *redisServer {
 func (s *redisServer) serve(c net.Conn) {
 	defer c.Close()
 	r := bufio.NewReader(c)
+	authed := s.requirePass == ""
 
 	for {
 		args, err := readCommand(r)
 		if err != nil {
 			return
+		}
+
+		if len(args) > 0 && strings.EqualFold(args[0], "AUTH") {
+			_, _ = c.Write([]byte(s.authReply(args)))
+			if s.authReply(args) == "+OK\r\n" {
+				authed = true
+			}
+			continue
+		}
+		if !authed {
+			_, _ = c.Write([]byte("-NOAUTH Authentication required.\r\n"))
+			continue
 		}
 
 		s.mu.Lock()
@@ -106,6 +153,59 @@ func (s *redisServer) serve(c net.Conn) {
 
 		_, _ = c.Write([]byte(":" + strconv.FormatInt(n, 10) + "\r\n"))
 	}
+}
+
+// authReply answers AUTH the way a real server does, including the two
+// operator mistakes that must stay distinguishable: the wrong password, and
+// a password sent to a server that has none.
+func (s *redisServer) authReply(args []string) string {
+	switch {
+	case s.requirePass == "":
+		return "-ERR Client sent AUTH, but no password is set\r\n"
+	case len(args) == 2 && args[1] == s.requirePass:
+		return "+OK\r\n"
+	default:
+		return "-WRONGPASS invalid username-password pair\r\n"
+	}
+}
+
+// selfSigned mints a certificate for 127.0.0.1 and the pool that trusts it,
+// so a TLS test verifies a real chain rather than skipping verification —
+// which would leave the one thing worth proving untested.
+func selfSigned(t *testing.T) (tls.Certificate, *x509.CertPool) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "127.0.0.1"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		DNSNames:              []string{"127.0.0.1"},
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("CreateCertificate: %v", err)
+	}
+
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(leaf)
+
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, roots
 }
 
 // apply runs one command against the counters. Callers hold the lock.
@@ -182,7 +282,7 @@ func readFull(r *bufio.Reader, buf []byte) (int, error) {
 
 func clientFor(t *testing.T, s *redisServer) *Client {
 	t.Helper()
-	client, err := NewClient(s.addr, 2)
+	client, err := NewClient(s.addr, 2, Options{})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -207,7 +307,7 @@ func tokenLimiterAt(t *testing.T, s *redisServer, budgets map[string]int) *Token
 // the way an unreachable Redis does.
 func deadStore(t *testing.T) *Client {
 	t.Helper()
-	client, err := NewClient("127.0.0.1:1", 2)
+	client, err := NewClient("127.0.0.1:1", 2, Options{})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}

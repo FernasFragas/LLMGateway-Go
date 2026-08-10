@@ -60,9 +60,29 @@ type AppLimits struct {
 	MaxInFlight     int // concurrent requests; 0: no ceiling of its own
 }
 
-// Redis locates the quota and breaker state store (fail open when down).
+// Redis locates the quota and breaker state store (fail open when down) and
+// says how to speak to it securely.
+//
+// TLS and PasswordPath are both off by default, which is correct for a Redis
+// on the pod network and wrong for a managed cache — and getting it wrong is
+// silent, because quotas fail open: limits simply stop applying and only a
+// log line says so. They are opt-in rather than defaulted for the same
+// reason the address is: this file is the one place the deployment's shape
+// is written down.
 type Redis struct {
 	Addr string
+	// TLS wraps the connection. A managed cache with encryption in transit
+	// enabled refuses a plaintext client outright.
+	TLS bool
+	// CAPath is a PEM bundle verifying the server's certificate; empty means
+	// the host's trust store, which is enough for a public CA and not enough
+	// for the private one most managed caches use.
+	CAPath string
+	// PasswordPath is a file holding the AUTH password. A path rather than
+	// the value, for the same reason provider keys are files: a credential in
+	// the ConfigMap is a credential in git. Empty means the server has no
+	// password.
+	PasswordPath string
 }
 
 // SecretSource locates the provider keys — app identity is the
@@ -189,7 +209,10 @@ type limitsWire struct {
 }
 
 type redisWire struct {
-	Addr string `yaml:"addr"`
+	Addr         string `yaml:"addr"`
+	TLS          bool   `yaml:"tls"`
+	CAPath       string `yaml:"ca_path"`
+	PasswordPath string `yaml:"password_path"`
 }
 
 type secretSourceWire struct {
@@ -304,9 +327,14 @@ func (w wire) toDomain() (Config, error) {
 		JWKS:              JWKS{URL: w.Auth.JWKSURL, RefreshInterval: interval},
 		Limits:            limits,
 		GlobalMaxInFlight: w.Server.GlobalMaxInFlight,
-		Redis:             Redis{Addr: w.Redis.Addr},
-		SecretSource:      secrets,
-		Telemetry:         Telemetry{OTLPEndpoint: w.Telemetry.OTLPEndpoint},
+		Redis: Redis{
+			Addr:         w.Redis.Addr,
+			TLS:          w.Redis.TLS,
+			CAPath:       w.Redis.CAPath,
+			PasswordPath: w.Redis.PasswordPath,
+		},
+		SecretSource: secrets,
+		Telemetry:    Telemetry{OTLPEndpoint: w.Telemetry.OTLPEndpoint},
 	}, nil
 }
 
