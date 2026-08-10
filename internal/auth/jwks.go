@@ -31,8 +31,9 @@ type JWKSCache struct {
 	url    string
 	client *http.Client
 
-	mu   sync.RWMutex
-	keys map[string]*rsa.PublicKey // by kid
+	mu       sync.RWMutex
+	keys     map[string]*rsa.PublicKey // by kid
+	loadedAt time.Time                 // last successful Refresh; zero until the first
 }
 
 // NewJWKSCache prepares a cache for the given JWKS URL; a nil client means a
@@ -101,9 +102,32 @@ func (c *JWKSCache) Refresh(ctx context.Context) error {
 
 	c.mu.Lock()
 	c.keys = keys
+	c.loadedAt = time.Now()
 	c.mu.Unlock()
 
 	return nil
+}
+
+// Age reports how long ago the signing keys last loaded successfully, and
+// whether they ever have. Fail static is only defensible because the
+// staleness is visible, and this is the number that makes it so: a cache
+// that stops refreshing keeps verifying tokens silently, right up until the
+// cluster rotates its signing key and every caller starts failing at once.
+//
+// A cache that has never loaded reports false, not a duration. Measuring
+// from the zero time would answer roughly 292 years — a number that is not
+// wrong so much as meaningless, and one that trips every staleness alert on
+// a pod that is merely starting. Readiness already covers cold; this
+// reports only on a cache that has something to be stale about.
+func (c *JWKSCache) Age() (time.Duration, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.loadedAt.IsZero() {
+		return 0, false
+	}
+
+	return time.Since(c.loadedAt), true
 }
 
 // Ready is health.Check-shaped: a cache that has never loaded keys refuses
