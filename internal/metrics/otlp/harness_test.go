@@ -19,6 +19,13 @@ import (
 	gwmetrics "github.com/FernasFragas/LLMGateway-Go/internal/metrics/gateway"
 )
 
+// testApps and testProviders are the closed sets these tests configure the
+// decorators with — the dimensions the callbacks enumerate.
+var (
+	testApps      = []string{"rag-api", "agent-service"}
+	testProviders = []string{"openai", "anthropic"}
+)
+
 // registerUsageOnly registers the full gateway instrument set with idle
 // decorators behind every port but the usage recorder, so a test about usage
 // states only the usage it recorded — the other counters observe nothing and
@@ -30,8 +37,8 @@ func registerUsageOnly(t *testing.T, meter metric.Meter, usage *gwmetrics.UsageR
 		gwmetrics.NewAppDirectory(staticApps{}),
 		gwmetrics.NewRateLimiter(limiter{}),
 		gwmetrics.NewTokenLimiter(tokenStub{}),
-		gwmetrics.NewSlotLimiter(slotStub{}),
-		gwmetrics.NewProviderClient(provider{}),
+		gwmetrics.NewSlotLimiter(slotStub{}, testApps),
+		gwmetrics.NewProviderClient(provider{}, testProviders),
 		usage,
 	)
 	if err != nil {
