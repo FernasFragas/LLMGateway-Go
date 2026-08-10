@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -110,7 +111,7 @@ func TestMintedTokenReachesTheModelStrangersDoNot(t *testing.T) {
 
 	log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 	checker := health.NewChecker()
-	dir, keys, _, err := newAppDirectory(config.Config{
+	dir, keys, _, err := newAppDirectory(context.Background(), config.Config{
 		Auth: auth.Config{
 			Issuer:   tokenIssuer,
 			Audience: "llm-gateway",
@@ -267,4 +268,81 @@ func (servingCore) Chat(context.Context, string, gateway.ChatRequest) (gateway.C
 		Message:      gateway.Message{Role: gateway.RoleAssistant, Content: "an answer"},
 		FinishReason: gateway.FinishStop,
 	}, nil
+}
+
+// TestABootWithTheWrongIssuerFailsInsteadOfServing is the clause GW-118
+// exists for: the shipped issuer default is Docker-Desktop-specific, and on
+// any managed cluster a pod configured with it becomes ready, passes every
+// probe, and refuses 100% of callers. Boot is the only place that mistake is
+// loud enough to catch.
+func TestABootWithTheWrongIssuerFailsInsteadOfServing(t *testing.T) {
+	key := mustRSAKey(t)
+	cluster := apiserverStub(t, key, `{"issuer":"https://oidc.eks.eu-west-1.amazonaws.com/id/EXAMPLE"}`)
+
+	_, _, _, err := newAppDirectory(context.Background(), configPointingAt(cluster, "https://kubernetes.default.svc.cluster.local"),
+		health.NewChecker(), discardLogger())
+
+	var mismatch *auth.IssuerMismatch
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("newAppDirectory = %v, want the boot to fail with an *IssuerMismatch", err)
+	}
+	if !strings.Contains(mismatch.Error(), "oidc.eks") {
+		t.Errorf("error = %q, want it to name the cluster's own issuer so the fix is copy-paste", mismatch)
+	}
+}
+
+// TestABootAgainstAnUnverifiableClusterStillComesUp is the other half of the
+// same decision. A wrong issuer is certain; an unreachable discovery
+// document is only unknown, and the JWKS fetch behind it is failing too — so
+// readiness holds traffic off this pod without a crash loop.
+func TestABootAgainstAnUnverifiableClusterStillComesUp(t *testing.T) {
+	key := mustRSAKey(t)
+	cluster := apiserverStub(t, key, "") // serves the keyset, 404s the discovery document
+
+	_, keys, _, err := newAppDirectory(context.Background(), configPointingAt(cluster, tokenIssuer),
+		health.NewChecker(), discardLogger())
+
+	if err != nil {
+		t.Fatalf("newAppDirectory = %v, want the boot to survive an unverifiable cluster", err)
+	}
+	if keys == nil {
+		t.Error("no key cache was built")
+	}
+}
+
+// apiserverStub serves the JWKS keyset always, and the discovery document
+// only when one is given — the difference between a cluster that can answer
+// the issuer question and one that cannot.
+func apiserverStub(t *testing.T, key *rsa.PrivateKey, discovery string) string {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/openid/v1/jwks", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(jwksFor(key, "kid-1"))
+	})
+	if discovery != "" {
+		mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(discovery))
+		})
+	}
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	return srv.URL
+}
+
+func configPointingAt(cluster, issuer string) config.Config {
+	return config.Config{
+		Auth: auth.Config{
+			Issuer:   issuer,
+			Audience: "llm-gateway",
+			Apps:     map[string]gateway.App{agentSubject: {Name: "agent-service"}},
+		},
+		JWKS: config.JWKS{URL: cluster + "/openid/v1/jwks", RefreshInterval: time.Minute},
+	}
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 }
