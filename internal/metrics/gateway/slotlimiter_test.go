@@ -3,7 +3,7 @@ package metrics
 import "testing"
 
 func TestGrantedSlotCountsAsAcquiredAndPassesReleaseThrough(t *testing.T) {
-	sl := NewSlotLimiter(slots{})
+	sl := NewSlotLimiter(slots{}, configuredApps)
 
 	release, _, ok := sl.TryAcquire("rag-api")
 
@@ -16,7 +16,7 @@ func TestGrantedSlotCountsAsAcquiredAndPassesReleaseThrough(t *testing.T) {
 }
 
 func TestRefusedSlotCountsAsRefusedWithTheCeilingThatRefused(t *testing.T) {
-	sl := NewSlotLimiter(slots{full: true, ceiling: 300})
+	sl := NewSlotLimiter(slots{full: true, ceiling: 300}, configuredApps)
 
 	_, ceiling, ok := sl.TryAcquire("rag-api")
 

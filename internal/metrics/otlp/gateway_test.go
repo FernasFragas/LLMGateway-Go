@@ -22,13 +22,13 @@ func TestRegisterGatewayReportsEveryCounterAtItsCurrentValue(t *testing.T) {
 	_, _ = tl.Check(context.Background(), "rag-api")
 	_ = tl.Settle(context.Background(), "rag-api", 15)
 
-	sl := gwmetrics.NewSlotLimiter(slotStub{full: true, ceiling: 300})
+	sl := gwmetrics.NewSlotLimiter(slotStub{full: true, ceiling: 300}, testApps)
 	_, _, _ = sl.TryAcquire("rag-api")
 
-	pc := gwmetrics.NewProviderClient(provider{err: &gateway.ProviderFault{Kind: gateway.FaultTimeout}})
-	_, _ = pc.Complete(context.Background(), gateway.ModelProvider{}, gateway.ChatRequest{})
+	pc := gwmetrics.NewProviderClient(provider{err: &gateway.ProviderFault{Kind: gateway.FaultTimeout}}, testProviders)
+	_, _ = pc.Complete(context.Background(), gateway.ModelProvider{Provider: "openai"}, gateway.ChatRequest{})
 
-	usage := gwmetrics.NewUsageRecorder(gateway.NopUsageRecorder{})
+	usage := gwmetrics.NewUsageRecorder(gateway.NopUsageRecorder{}, testApps)
 	usage.RecordCompletion("rag-api", gateway.ModelProvider{}, gateway.Usage{PromptTokens: 10, CompletionTokens: 5}, 0, false)
 
 	if err := RegisterGateway(mp.Meter("test"), apps, rl, tl, sl, pc, usage); err != nil {
@@ -56,7 +56,7 @@ func TestRegisterGatewayReportsEveryCounterAtItsCurrentValue(t *testing.T) {
 
 	kindValues, ok := got["provider_failures_total"]
 	if !ok || len(kindValues) != 1 || kindValues[0] != 1 {
-		t.Errorf("provider_failures_total = %v, want exactly one data point valued 1 (the timeout kind)", kindValues)
+		t.Errorf("provider_failures_total = %v, want exactly one data point valued 1 (openai's timeout)", kindValues)
 	}
 }
 
@@ -66,7 +66,7 @@ func TestTheUnobservedSpendEstimateIsReportedByReason(t *testing.T) {
 	// which trade produced the tokens.
 	mp, reader := meterAndReader()
 
-	usage := gwmetrics.NewUsageRecorder(gateway.NopUsageRecorder{})
+	usage := gwmetrics.NewUsageRecorder(gateway.NopUsageRecorder{}, testApps)
 	usage.RecordDoubleSpendRisk("rag-api", gateway.ModelProvider{}, 512)
 	usage.RecordClientDisconnect("rag-api", gateway.ModelProvider{}, 128)
 
@@ -87,7 +87,7 @@ func TestAReasonWithNoSpendIsNotReportedAtAll(t *testing.T) {
 	// that actually happened.
 	mp, reader := meterAndReader()
 
-	usage := gwmetrics.NewUsageRecorder(gateway.NopUsageRecorder{})
+	usage := gwmetrics.NewUsageRecorder(gateway.NopUsageRecorder{}, testApps)
 	usage.RecordDoubleSpendRisk("rag-api", gateway.ModelProvider{}, 512)
 
 	registerUsageOnly(t, mp.Meter("test"), usage)
@@ -95,5 +95,82 @@ func TestAReasonWithNoSpendIsNotReportedAtAll(t *testing.T) {
 	byReason := collectedByAttr(t, reader, "unobserved_spend_tokens_estimate", "reason")
 	if _, present := byReason["client_disconnect"]; present {
 		t.Errorf("reason=client_disconnect reported %d with no disconnect recorded", byReason["client_disconnect"])
+	}
+}
+
+func TestTokenSpendIsExportedPerApp(t *testing.T) {
+	// The series the brief's reconciliation criterion is written against:
+	// sum(llm_prompt_tokens_total{app="rag-api"}). Without the label the
+	// criterion has no query, whatever the totals say.
+	mp, reader := meterAndReader()
+
+	usage := gwmetrics.NewUsageRecorder(gateway.NopUsageRecorder{}, testApps)
+	usage.RecordCompletion("rag-api", gateway.ModelProvider{Provider: "openai"},
+		gateway.Usage{PromptTokens: 21, CompletionTokens: 30}, 0, false)
+	usage.RecordCompletion("agent-service", gateway.ModelProvider{Provider: "openai"},
+		gateway.Usage{PromptTokens: 100, CompletionTokens: 200}, 0, false)
+
+	registerUsageOnly(t, mp.Meter("test"), usage)
+
+	prompt := collectedByAttr(t, reader, "llm_prompt_tokens_total", "app")
+	if prompt["rag-api"] != 21 || prompt["agent-service"] != 100 {
+		t.Errorf("llm_prompt_tokens_total by app = %v, want rag-api 21 and agent-service 100", prompt)
+	}
+
+	completion := collectedByAttr(t, reader, "llm_completion_tokens_total", "app")
+	if completion["rag-api"] != 30 || completion["agent-service"] != 200 {
+		t.Errorf("llm_completion_tokens_total by app = %v, want rag-api 30 and agent-service 200", completion)
+	}
+}
+
+func TestAnAppWithNoActivityProducesNoSeries(t *testing.T) {
+	// A configured app that did nothing is absent rather than zero, the same
+	// convention every other breakdown here follows — a dashboard shows the
+	// apps that actually ran.
+	mp, reader := meterAndReader()
+
+	usage := gwmetrics.NewUsageRecorder(gateway.NopUsageRecorder{}, testApps)
+	usage.RecordCompletion("rag-api", gateway.ModelProvider{Provider: "openai"},
+		gateway.Usage{PromptTokens: 21}, 0, false)
+
+	registerUsageOnly(t, mp.Meter("test"), usage)
+
+	prompt := collectedByAttr(t, reader, "llm_prompt_tokens_total", "app")
+	if _, present := prompt["agent-service"]; present {
+		t.Errorf("agent-service reported %d prompt tokens having served nothing", prompt["agent-service"])
+	}
+}
+
+func TestUpstreamFailuresAreExportedPerProvider(t *testing.T) {
+	// "Upstream failures are up" is not actionable; "anthropic's timeouts are
+	// up" is. Both labels have to survive to the wire for that to be true.
+	mp, reader := meterAndReader()
+
+	pc := gwmetrics.NewProviderClient(provider{err: &gateway.ProviderFault{Kind: gateway.FaultTimeout}}, testProviders)
+	_, _ = pc.Complete(context.Background(), gateway.ModelProvider{Provider: "anthropic"}, gateway.ChatRequest{})
+
+	err := RegisterGateway(mp.Meter("test"),
+		gwmetrics.NewAppDirectory(staticApps{}),
+		gwmetrics.NewRateLimiter(limiter{}),
+		gwmetrics.NewTokenLimiter(tokenStub{}),
+		gwmetrics.NewSlotLimiter(slotStub{}, testApps),
+		pc,
+		gwmetrics.NewUsageRecorder(gateway.NopUsageRecorder{}, testApps),
+	)
+	if err != nil {
+		t.Fatalf("RegisterGateway: %v", err)
+	}
+
+	byProvider := collectedByAttr(t, reader, "provider_failures_total", "provider")
+	if byProvider["anthropic"] != 1 {
+		t.Errorf("provider_failures_total by provider = %v, want anthropic 1", byProvider)
+	}
+	if _, present := byProvider["openai"]; present {
+		t.Error("openai reported a failure it never had — the provider label is not separating the series")
+	}
+
+	byKind := collectedByAttr(t, reader, "provider_failures_total", "kind")
+	if byKind["timeout"] != 1 {
+		t.Errorf("provider_failures_total by kind = %v, want timeout 1 — both labels must survive together", byKind)
 	}
 }
