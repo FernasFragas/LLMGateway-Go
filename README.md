@@ -67,7 +67,11 @@ release.
 - **Nothing fails invisibly.** Every degradation has a gauge, a log line, or a
   probe attached — serving a stale credential is only defensible because the
   staleness is measurable.
-- **Every acceptance criterion is a runnable test.** `make verify`.
+- **The fixtures prove themselves.** `config.example.yaml` and `openapi.yaml`
+  are tested artifacts, not documentation: `make verify` lints the spec, runs
+  the unit suite, and re-runs the quota store against a real Redis in a
+  container, where the Lua scripts and the hand-rolled RESP client meet a
+  server that decides for itself what a reply looks like. Needs Docker.
 
 ## Design - Hexagonal architecture.
 
@@ -89,26 +93,27 @@ graph LR
         SVC["Service<br/>admit → route → fail over<br/><i>no HTTP, no SDKs, no Redis</i>"]
         P1(["AppDirectory"])
         P2(["RateLimiter"])
-        P3(["SlotLimiter"])
-        P4(["ProviderClient"])
-        P5(["UsageRecorder"])
+        P3(["TokenLimiter"])
+        P4(["SlotLimiter"])
+        P5(["ProviderClient"])
+        P6(["UsageRecorder"])
     end
 
     subgraph DRIVEN["Driven adapters"]
         AUTH["internal/auth<br/>SA token + JWKS cache"]
-        RL["Redis limiter"]
+        RL["internal/redis<br/>rps + tokens/min"]
         SL["in-process semaphore"]
         PROV["internal/openai<br/>internal/anthropic<br/>internal/ollama"]
         UR["usage recorder"]
     end
 
     API -->|"implements ChatService against"| SVC
-    SVC --- P1 & P2 & P3 & P4 & P5
+    SVC --- P1 & P2 & P3 & P4 & P5 & P6
     AUTH -->|implements| P1
-    RL -->|implements| P2
-    SL -->|implements| P3
-    PROV -->|implements| P4
-    UR -->|implements| P5
+    RL -->|implements| P2 & P3
+    SL -->|implements| P4
+    PROV -->|implements| P5
+    UR -->|implements| P6
 ```
 
 Every arrow points *into* `internal/gateway`. Adapters import the core; the
