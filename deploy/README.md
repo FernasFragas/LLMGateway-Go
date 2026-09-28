@@ -45,12 +45,23 @@ this repo would have to keep patched. Losing it costs one unenforced window,
 which is exactly why running without one is survivable and why owning one
 is not worth it.
 
-Point `redis.addr` at what you already run:
+Point `redis.addr` at what you already run, and set its security alongside —
+a managed cache with encryption in transit refuses a plaintext client, and one
+with an auth token refuses every command:
 
 ```yaml
 redis:
   addr: my-cache.abc123.ng.0001.euw1.cache.amazonaws.com:6379
+  tls: true
+  ca_path: /etc/gateway/redis/ca.pem          # private CA; omit for a public one
+  password_path: /etc/gateway/redis/password  # the file, never the value
 ```
+
+Both are files, mounted from a Secret, for the same reason provider keys are:
+a credential in the ConfigMap is a credential in git. An unreadable one fails
+the boot deliberately — quotas fail open, so a client that connects and is
+then refused would leave every limit unenforced with nothing but a log line to
+say so.
 
 Connections are pooled small on purpose (8, against a budget of ~3 operations
 per request), so the instance can be the smallest one on offer.

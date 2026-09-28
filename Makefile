@@ -13,7 +13,7 @@ COVERPROFILE := coverage.out
 .DEFAULT_GOAL := help
 .PHONY: help verify build run \
         docker-build docker-run docker-stop \
-        test test-race test-integration cover lint-spec contract-test clean
+        test test-race test-integration test-evals e2e cover lint-spec contract-test clean
 
 help:                         ## list the available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -81,6 +81,12 @@ contract-test:                ## fuzz the RUNNING gateway against the spec (prov
 	st run $(OPENAPI) --base-url http://localhost:$(PORT) \
 	  --header "Authorization: Bearer $$TEST_APP_TOKEN" \
 	  --checks all --hypothesis-max-examples=200
+
+test-evals:                   ## the evaluation runner's and stub provider's own tests (no network)
+	python3 -m unittest discover -s evals -v
+
+e2e:                          ## whole chain on a kind cluster against a stub provider (refuses non-kind contexts)
+	deploy/ci/e2e.sh
 
 # ─── housekeeping ───────────────────────────────────────────────────────────
 

@@ -31,7 +31,7 @@ routes:
   - model: claude-sonnet-4
     provider: anthropic
     endpoint: https://api.anthropic.com/v1
-  - model: llama3
+  - model: llama3.2
     provider: ollama
     endpoint: http://ollama.llm.svc.cluster.local:11434
 

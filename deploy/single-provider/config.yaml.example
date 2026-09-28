@@ -1,0 +1,36 @@
+# Copy to config/config.yaml and set issuer, model, endpoint and infrastructure.
+server:
+  listen: ":8080"
+  max_body_bytes: 524288
+  global_max_in_flight: 10
+  total_deadline: 30s
+  per_try_deadline: 20s
+  write_timeout: 40s
+auth:
+  issuer: https://REPLACE-WITH-CLUSTER-ISSUER
+  audience: llm-gateway
+  jwks_url: https://kubernetes.default.svc/openid/v1/jwks
+  refresh_interval: 5m
+routes:
+  - model: REPLACE-WITH-MODEL
+    provider: openai
+    endpoint: https://REPLACE-WITH-OPENAI-COMPATIBLE-ENDPOINT/v1
+failover_order: [openai]
+apps:
+  agent-service:
+    subject: system:serviceaccount:llm:agent-service
+    limits:
+      rps: 2
+      tokens_per_minute: 10000
+      max_in_flight: 2
+    failover_policy: same-model
+redis:
+  addr: redis.llm.svc.cluster.local:6379
+secret_source:
+  kind: file
+  refresh_interval: 5m
+  providers:
+    openai:
+      path: /etc/gateway/keys/openai
+telemetry:
+  otlp_endpoint: otel-collector.observability.svc.cluster.local:4317

@@ -1,0 +1,115 @@
+# In-cluster Ollama: the keyless route `deploy/configmap.yaml` declares at
+# ollama.llm.svc.cluster.local:11434. Development only.
+#
+# Opt-in, which is why it lives in a subdirectory: `kubectl apply -f deploy/dev/`
+# does not recurse, so the everyday apply never starts a multi-GB download.
+# Apply it on its own:
+#
+#   kubectl apply -f deploy/dev/ollama/
+#
+# The pod pulls $MODEL on first start and reports ready only once the model is
+# on disk, so the Service routes nothing to a half-pulled instance. Models live
+# on a PersistentVolume and survive pod restarts; deleting the PVC re-downloads.
+#
+# MODEL must equal the route's `model:` in the gateway ConfigMap: the gateway
+# sends the route's model name to Ollama verbatim.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-models
+  namespace: llm
+  labels:
+    app: ollama
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: llm
+  labels:
+    app: ollama
+spec:
+  replicas: 1
+  # One ReadWriteOnce volume: the old pod must let go of it before the new one
+  # mounts it, so no rolling overlap.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ollama
+  template:
+    metadata:
+      labels:
+        app: ollama
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000            # makes the volume writable for UID 1000
+      containers:
+        - name: ollama
+          image: ollama/ollama:0.34.4
+          # Serve, wait until the API answers, pull the model (a no-op once it
+          # is on the volume), then stay attached to the server process.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              ollama serve &
+              until ollama list >/dev/null 2>&1; do sleep 1; done
+              ollama pull "$MODEL"
+              wait
+          env:
+            - name: MODEL
+              value: llama3.2
+            - name: OLLAMA_HOST          # listen on all interfaces, not just loopback
+              value: 0.0.0.0:11434
+            - name: OLLAMA_MODELS        # keep models on the volume
+              value: /models
+            - name: OLLAMA_KEEP_ALIVE    # keep the model loaded: a cold load can outlast the gateway's per-try deadline
+              value: "-1"
+            - name: HOME                 # ollama writes an identity key under $HOME
+              value: /models/home
+          ports:
+            - name: http
+              containerPort: 11434
+          # Ready only once the model is pulled. No liveness probe: a restart
+          # mid-download would only start the download again.
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "ollama show \"$MODEL\" >/dev/null"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: "2"
+              memory: 3Gi
+            limits:
+              memory: 6Gi
+          volumeMounts:
+            - name: models
+              mountPath: /models
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: ollama-models
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  namespace: llm
+  labels:
+    app: ollama
+spec:
+  selector:
+    app: ollama
+  ports:
+    - name: http
+      port: 11434
+      targetPort: http

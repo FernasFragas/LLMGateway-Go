@@ -20,3 +20,8 @@ coverage.html
 coverage.out
 
 .env
+
+/evals/results/
+/config/single-provider.yaml
+
+.DS_Store
