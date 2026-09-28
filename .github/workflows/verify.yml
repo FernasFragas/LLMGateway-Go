@@ -1,6 +1,9 @@
 # Path in repo: .github/workflows/verify.yml
 name: verify
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
@@ -57,7 +60,10 @@ jobs:
 
       # Creates the cluster and points kubectl at it (context kind-llm-e2e),
       # which is the only kind of context e2e.sh agrees to run against.
-      - uses: helm/kind-action@v1
+      # Pinned to a commit, not a tag: a tag can be moved to other code, a
+      # commit hash cannot. To upgrade, look up the new release's commit and
+      # replace both the hash and the comment.
+      - uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
         with:
           cluster_name: llm-e2e
 
