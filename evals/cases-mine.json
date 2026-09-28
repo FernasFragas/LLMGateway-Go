@@ -1,0 +1,12 @@
+[
+  {"id":"case-01","prompt":"","check":{"exact":""}},
+  {"id":"case-02","prompt":"","check":{"exact":""}},
+  {"id":"case-03","prompt":"","check":{"exact":""}},
+  {"id":"case-04","prompt":"","check":{"contains":""}},
+  {"id":"case-05","prompt":"","check":{"contains":""}},
+  {"id":"case-06","prompt":"","check":{"exact":""}},
+  {"id":"case-07","prompt":"","check":{"exact":""}},
+  {"id":"case-08","prompt":"","check":{"json_equal":null}},
+  {"id":"case-09","prompt":"","check":{"json_equal":null}},
+  {"id":"unknown","prompt":"","check":{"exact":"UNKNOWN"}}
+]

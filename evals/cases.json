@@ -1,0 +1,12 @@
+[
+  {"id":"arithmetic","prompt":"What is 17 + 25? Reply with only the number.","check":{"exact":"42"}},
+  {"id":"classification","prompt":"Classify the sentiment of 'I love this helpful tool' as positive, neutral, or negative. Reply with only the lowercase label.","check":{"exact":"positive"}},
+  {"id":"extraction","prompt":"From 'Contact Mira at mira@example.com on Monday', extract only the email address.","check":{"exact":"mira@example.com"}},
+  {"id":"json","prompt":"Return only a JSON object with exactly two fields: city set to Lisbon and country set to Portugal.","check":{"json_equal":{"city":"Lisbon","country":"Portugal"}}},
+  {"id":"sorting","prompt":"Sort 9, 2, 5 in ascending order. Return only a JSON array of numbers.","check":{"json_equal":[2,5,9]}},
+  {"id":"translation","prompt":"Translate the English word 'cat' into Portuguese. Reply with only the singular lowercase word.","check":{"exact":"gato"}},
+  {"id":"grounding","prompt":"Use only this text: 'The parcel arrived Tuesday. Its box was blue.' What color was the box? Reply with one lowercase word.","check":{"exact":"blue"}},
+  {"id":"abstention","prompt":"Use only this text: 'Mira owns a bicycle.' What is Mira's age? If the text does not say, reply with exactly UNKNOWN.","check":{"exact":"UNKNOWN"}},
+  {"id":"instruction","prompt":"Reply with exactly the word READY in uppercase and no other text.","check":{"exact":"READY"}},
+  {"id":"boolean","prompt":"Return only a JSON object with a single field named even whose boolean value indicates whether 8 is even.","check":{"json_equal":{"even":true}}}
+]

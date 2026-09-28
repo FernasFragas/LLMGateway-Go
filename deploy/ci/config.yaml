@@ -1,0 +1,40 @@
+# Gateway config for the end-to-end check (deploy/ci/e2e.sh): one route to the
+# stub provider, one caller. __ISSUER__ is replaced with the kind cluster's
+# issuer at run time, since the gateway refuses to boot on a wrong one.
+server:
+  listen: ":8080"
+  max_body_bytes: 524288
+  global_max_in_flight: 10
+  total_deadline: 10s
+  per_try_deadline: 5s
+  write_timeout: 20s
+auth:
+  issuer: __ISSUER__
+  audience: llm-gateway
+  jwks_url: https://kubernetes.default.svc/openid/v1/jwks
+  refresh_interval: 5m
+routes:
+  - model: stub-model
+    provider: openai
+    endpoint: http://stub-provider.llm.svc.cluster.local:8080/v1
+failover_order: [openai]
+apps:
+  agent-service:
+    subject: system:serviceaccount:llm:agent-service
+    limits:
+      rps: 100                   # the stub answers in milliseconds; a low limit would 429 the run
+      tokens_per_minute: 100000
+      max_in_flight: 5
+    failover_policy: same-model
+redis:
+  addr: redis.llm.svc.cluster.local:6379
+secret_source:
+  kind: file
+  refresh_interval: 5m
+  providers:
+    openai:
+      path: /etc/gateway/keys/openai
+telemetry:
+  # No collector runs in the check. Metric exports fail in the background;
+  # requests are unaffected.
+  otlp_endpoint: otel-collector.observability.svc.cluster.local:4317

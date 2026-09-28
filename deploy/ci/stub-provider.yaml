@@ -1,0 +1,71 @@
+# The fake OpenAI-compatible provider the end-to-end check routes to
+# (evals/stub_provider.py). Its code and the cases it answers arrive through
+# the stub-provider ConfigMap, which deploy/ci/e2e.sh creates from the repo
+# files. It expects the same key the gateway was given, read from the same
+# Secret, so a key that never reaches the gateway fails the run.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stub-provider
+  namespace: llm
+  labels:
+    app: stub-provider
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stub-provider
+  template:
+    metadata:
+      labels:
+        app: stub-provider
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: stub
+          image: python:3.12-alpine
+          command: ["python3", "/app/stub_provider.py"]
+          env:
+            - name: STUB_CASES
+              value: /app/cases.json
+            - name: STUB_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: llm-gateway-provider-keys
+                  key: openai
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: app
+              mountPath: /app
+              readOnly: true
+      volumes:
+        - name: app
+          configMap:
+            name: stub-provider
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stub-provider
+  namespace: llm
+  labels:
+    app: stub-provider
+spec:
+  selector:
+    app: stub-provider
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

@@ -1,6 +1,9 @@
 # Path in repo: .github/workflows/verify.yml
 name: verify
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
@@ -38,5 +41,39 @@ jobs:
       - name: Integration tests (real Redis)
         run: make test-integration
 
+      # The evaluation runner and the stub provider are code too. No network,
+      # no model: ubuntu-latest's python3 and the standard library only.
+      - name: Evaluation harness tests
+        run: make test-evals
+
       - name: Build
         run: make build
+
+  # The whole request chain on a throwaway kind cluster, with a stub provider
+  # standing in for a model: token → auth → route → provider key → adapter →
+  # scoring. No real key, no cost, the same result every run. Runs in parallel
+  # with verify; the script itself is deploy/ci/e2e.sh, so it runs locally too.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Creates the cluster and points kubectl at it (context kind-llm-e2e),
+      # which is the only kind of context e2e.sh agrees to run against.
+      # Pinned to a commit, not a tag: a tag can be moved to other code, a
+      # commit hash cannot. To upgrade, look up the new release's commit and
+      # replace both the hash and the comment.
+      - uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          cluster_name: llm-e2e
+
+      - name: End-to-end evaluation against a stub provider
+        run: make e2e
+
+      - name: Keep the evaluation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-report
+          path: evals/results/e2e.json
+          if-no-files-found: ignore
